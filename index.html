@@ -72,7 +72,7 @@
             <div>
                 <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
                     Umbra SAR Navigator 
-                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.2.5</span>
+                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.2.6</span>
                     <span class="text-xs bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded font-normal">Analyst Tool</span>
                 </h1>
                 <p class="text-xs text-slate-400">Interactive OpenStreetMap client for Umbra Space SpatioTemporal Asset Catalogs</p>
@@ -497,58 +497,51 @@
         function translateS3Url(rawHref, sourceUrl) {
             if (!rawHref) return "";
             
-            // Clean input strictly
-            let finalUrl = String(rawHref).trim();
+            // Clean input by explicitly replacing literal spaces with %20 so URL parser doesn't choke
+            let urlStr = String(rawHref).trim().replace(/ /g, '%20');
 
-            if (finalUrl.startsWith('s3://')) {
-                const parts = finalUrl.replace('s3://', '').split('/');
+            if (urlStr.startsWith('s3://')) {
+                const parts = urlStr.replace('s3://', '').split('/');
                 const bucket = parts.shift();
-                const s3Path = parts.join('/');
-                finalUrl = `https://${bucket}.s3.us-west-2.amazonaws.com/${s3Path}`;
-            } else if (finalUrl.startsWith('http://') || finalUrl.startsWith('https://')) {
-                // Already an absolute URL, do nothing
-            } else {
-                // It is a relative path. We MUST resolve it against the source STAC Item URL
+                urlStr = `https://${bucket}.s3.us-west-2.amazonaws.com/${parts.join('/')}`;
+            } else if (!urlStr.startsWith('http://') && !urlStr.startsWith('https://')) {
+                // It is a relative path. Resolve it against the source STAC Item URL
                 if (sourceUrl) {
                     try {
-                        finalUrl = new URL(finalUrl, sourceUrl).href;
+                        urlStr = new URL(urlStr, sourceUrl).href;
                     } catch(e) {
-                        // Fallback manual resolution if URL class fails
                         const base = sourceUrl.substring(0, sourceUrl.lastIndexOf('/'));
-                        finalUrl = `${base}/${finalUrl.replace('./', '')}`;
+                        urlStr = `${base}/${urlStr.replace(/^\.\//, '')}`;
                     }
                 }
             }
 
             // Rescue "?prefix=" directory queries and convert to absolute object paths
-            if (finalUrl.includes('?prefix=')) {
+            if (urlStr.includes('?prefix=')) {
                 try {
-                    const u = new URL(finalUrl);
+                    const u = new URL(urlStr);
                     const prefix = u.searchParams.get('prefix');
                     if (prefix) {
                         const host = u.hostname.replace('.s3-website.', '.s3.');
-                        finalUrl = `https://${host}/${prefix}`;
+                        urlStr = `https://${host}/${prefix}`;
                     }
                 } catch(e) {}
             }
 
-            // 1. Force HTTPS to prevent Mixed Content blocks on GitHub Pages
-            if (finalUrl.startsWith('http://')) {
-                finalUrl = finalUrl.replace('http://', 'https://');
+            // Force HTTPS
+            urlStr = urlStr.replace('http://', 'https://');
+
+            // Normalize AWS S3 URLs to virtual-hosted format with region to ensure CORS compliance
+            if (urlStr.includes('s3.amazonaws.com')) {
+                urlStr = urlStr.replace('s3.amazonaws.com', 's3.us-west-2.amazonaws.com');
             }
 
-            // 2. Normalize AWS S3 URLs to virtual-hosted format with region to ensure CORS compliance
-            if (finalUrl.includes('s3.amazonaws.com')) {
-                finalUrl = finalUrl.replace('s3.amazonaws.com', 's3.us-west-2.amazonaws.com');
+            // Prevent hitting HTML directory viewers (e.g. s3-website)
+            if (urlStr.includes('.s3-website.')) {
+                urlStr = urlStr.replace('.s3-website.', '.s3.');
             }
 
-            // 3. Prevent hitting HTML directory viewers (e.g. s3-website)
-            if (finalUrl.includes('.s3-website.')) {
-                finalUrl = finalUrl.replace('.s3-website.', '.s3.');
-            }
-
-            // Return URL safely encoded for fetch operations
-            return finalUrl.replace(/ /g, '%20');
+            return urlStr;
         }
 
         window.onload = function() {
@@ -1392,56 +1385,54 @@
             let primaryGeoTiffUrl = null;
             let geoTiffItemTitle = "GeoTIFF Asset";
 
-            if (item.assets) {
+            if (item.assets && Object.keys(item.assets).length > 0) {
                 for (const [key, asset] of Object.entries(item.assets)) {
+                    const href = String(asset.href || "");
+                    const type = String(asset.type || "").toLowerCase();
+                    const lowerKey = String(key).toLowerCase();
+                    const absoluteUrl = translateS3Url(href, item.sourceUrl);
+                    
+                    // Evaluate path safely to avoid crashing on weird URLs
+                    let pathname = "";
                     try {
-                        const href = String(asset.href || "");
-                        const type = String(asset.type || "").toLowerCase();
-                        const lowerKey = String(key).toLowerCase();
-                        const absoluteUrl = translateS3Url(href, item.sourceUrl);
-                        
-                        // Evaluate path safely to avoid crashing on weird URLs
-                        let pathname = "";
-                        try {
-                            pathname = new URL(absoluteUrl).pathname.toLowerCase().trim();
-                        } catch (e) {
-                            pathname = String(absoluteUrl).toLowerCase().trim();
-                        }
-                        
-                        // Categorize the asset type safely
-                        const isJson = pathname.endsWith('.json') || type.includes('json') || lowerKey.includes('json') || lowerKey === 'gjd';
-                        const isNitf = pathname.endsWith('.nitf') || pathname.endsWith('.ntf') || type.includes('nitf') || lowerKey.includes('sicd') || lowerKey.includes('sidd');
-                        const isHtmlViewer = pathname.endsWith('.html') || absoluteUrl.includes('?prefix=');
-                        
-                        // Detect true GeoTIFF (Now completely safe from query params breaking it)
-                        const isGeoTiff = !isJson && !isNitf && !isHtmlViewer && (
-                            pathname.includes('.tif') || 
-                            pathname.includes('.tiff') || 
-                            lowerKey.includes('gec') || 
-                            lowerKey.includes('tif') || 
-                            type.includes('tiff') || 
-                            type.includes('geotiff')
-                        );
-                        
-                        if (isGeoTiff && !primaryGeoTiffUrl && absoluteUrl !== "") {
-                            primaryGeoTiffUrl = absoluteUrl;
-                            geoTiffItemTitle = asset.title || key;
-                        }
-                        
-                        // Detect Quicklook/Thumbnail (must explicitly be a valid web image format)
-                        const isPreviewImage = !isJson && !isNitf && !isGeoTiff && !isHtmlViewer && (
-                            pathname.includes('.png') || 
-                            pathname.includes('.jpg') || 
-                            pathname.includes('.jpeg') || 
-                            type.includes('png') || 
-                            type.includes('jpeg')
-                        );
-                        
-                        if (isPreviewImage && !quicklookUrl && absoluteUrl !== "") {
-                            quicklookUrl = absoluteUrl;
-                        }
+                        pathname = new URL(absoluteUrl).pathname.toLowerCase().trim();
                     } catch (e) {
-                        console.error("Error analyzing asset for quicklook mapping:", key, e);
+                        pathname = String(absoluteUrl).toLowerCase().trim();
+                    }
+                    
+                    // Categorize the asset type safely
+                    const isJson = pathname.endsWith('.json') || type.includes('json') || lowerKey.includes('json') || lowerKey === 'gjd';
+                    const isNitf = pathname.endsWith('.nitf') || pathname.endsWith('.ntf') || type.includes('nitf') || lowerKey.includes('sicd') || lowerKey.includes('sidd');
+                    const isHtmlViewer = pathname.endsWith('.html') || absoluteUrl.includes('?prefix=');
+                    
+                    // Detect true GeoTIFF (Now completely safe from query params breaking it)
+                    const isGeoTiff = !isJson && !isNitf && !isHtmlViewer && (
+                        pathname.endsWith('.tif') || 
+                        pathname.endsWith('.tiff') || 
+                        lowerKey.includes('gec') || 
+                        lowerKey.includes('tif') || 
+                        type.includes('tiff') || 
+                        type.includes('geotiff')
+                    );
+                    
+                    if (isGeoTiff && !primaryGeoTiffUrl && absoluteUrl !== "") {
+                        primaryGeoTiffUrl = absoluteUrl;
+                        geoTiffItemTitle = asset.title || key;
+                    }
+                    
+                    // Detect Quicklook/Thumbnail (must explicitly be a valid web image format)
+                    const isPreviewImage = !isJson && !isNitf && !isGeoTiff && !isHtmlViewer && (
+                        pathname.endsWith('.png') || 
+                        pathname.endsWith('.jpg') || 
+                        pathname.endsWith('.jpeg') || 
+                        type.includes('png') || 
+                        type.includes('jpeg') ||
+                        lowerKey.includes('preview') ||
+                        lowerKey.includes('thumbnail')
+                    );
+                    
+                    if (isPreviewImage && !quicklookUrl && absoluteUrl !== "") {
+                        quicklookUrl = absoluteUrl;
                     }
                 }
             }
@@ -1500,89 +1491,85 @@
             const assetsContainer = document.getElementById('detail-assets-list');
             assetsContainer.innerHTML = "";
 
-            if (item.assets) {
+            if (item.assets && Object.keys(item.assets).length > 0) {
                 Object.keys(item.assets).forEach(key => {
+                    const asset = item.assets[key];
+                    const type = String(asset.type || "").toLowerCase();
+                    const href = String(asset.href || "");
+                    const lowerKey = String(key).toLowerCase();
+                    
+                    const absoluteAssetUrl = translateS3Url(href, item.sourceUrl);
+                    if (!absoluteAssetUrl) return; // skip missing urls
+
+                    // Safely extract extension
+                    let extension = ".bin";
+                    let pathname = "";
                     try {
-                        const asset = item.assets[key];
-                        const type = String(asset.type || "").toLowerCase();
-                        const href = String(asset.href || "");
-                        const lowerKey = String(key).toLowerCase();
-                        
-                        const absoluteAssetUrl = translateS3Url(href, item.sourceUrl);
-                        if (!absoluteAssetUrl) return; // skip missing urls
-
-                        // Safely extract extension
-                        let extension = ".bin";
-                        let pathname = "";
-                        try {
-                            const urlObj = new URL(absoluteAssetUrl);
-                            pathname = urlObj.pathname.toLowerCase().trim();
-                            const match = pathname.match(/\.[a-zA-Z0-9]+$/);
-                            if (match) {
-                                extension = match[0];
-                            }
-                        } catch (e) {
-                            pathname = absoluteAssetUrl.toLowerCase().trim();
+                        const urlObj = new URL(absoluteAssetUrl);
+                        pathname = urlObj.pathname.toLowerCase().trim();
+                        const match = pathname.match(/\.[a-zA-Z0-9]+$/);
+                        if (match) {
+                            extension = match[0];
                         }
-
-                        // Categorize Asset
-                        const isJson = pathname.endsWith('.json') || type.includes('json') || lowerKey.includes('json') || lowerKey === 'gjd';
-                        const isNitf = pathname.endsWith('.nitf') || pathname.endsWith('.ntf') || type.includes('nitf') || lowerKey.includes('sicd') || lowerKey.includes('sidd');
-                        const isHtmlViewer = pathname.endsWith('.html') || absoluteAssetUrl.includes('?prefix=');
-                        
-                        const isGeoTiff = !isJson && !isNitf && !isHtmlViewer && (
-                            pathname.includes('.tif') || 
-                            pathname.includes('.tiff') || 
-                            lowerKey.includes('gec') || 
-                            lowerKey.includes('tif') || 
-                            type.includes('tiff') || 
-                            type.includes('geotiff')
-                        );
-
-                        // Fetch custom descriptor and icon for GIS analysts
-                        const info = getAssetFriendlyInfo(key, asset, isGeoTiff, isJson, isNitf);
-
-                        const assetRow = document.createElement('div');
-                        assetRow.className = "flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-slate-950 hover:bg-slate-900 rounded-lg text-xs font-semibold text-slate-300 transition-all border border-slate-800 hover:border-indigo-500/30 gap-2";
-                        
-                        const mimeTypeStr = (typeof asset.type === 'string' && asset.type.includes('/')) ? asset.type.split('/').pop().toUpperCase() : "DATA";
-
-                        assetRow.innerHTML = `
-                            <div class="flex items-start gap-2.5 truncate w-full sm:w-auto">
-                                <i data-lucide="${info.icon}" class="w-4 h-4 text-indigo-400 shrink-0 mt-0.5"></i>
-                                <div class="truncate">
-                                    <span class="block text-slate-200 font-semibold truncate text-left">${info.label}</span>
-                                    <span class="block text-[10px] text-slate-400 font-normal truncate mt-0.5 text-left">${info.description}</span>
-                                </div>
-                            </div>
-                            <div class="flex items-center gap-2 shrink-0 self-end sm:self-center">
-                                <span class="text-[9px] ${info.badgeColor} px-1.5 py-0.5 rounded uppercase font-mono">${mimeTypeStr}</span>
-                                
-                                <!-- Dynamic Play/Monitor Icon to Stream GeoTIFF directly to client map -->
-                                ${isGeoTiff ? `
-                                <button class="stream-raster-btn p-1.5 bg-indigo-600 hover:bg-indigo-500 rounded border border-indigo-500 text-white transition-all shadow-sm"
-                                        data-url="${absoluteAssetUrl}" title="Stream raw GeoTIFF directly onto this web map">
-                                    <i data-lucide="monitor-play" class="w-3.5 h-3.5"></i>
-                                </button>
-                                ` : ''}
-
-                                <!-- Copy URL Button -->
-                                <button class="copy-url-btn p-1.5 bg-slate-900 hover:bg-slate-800 rounded border border-slate-700 text-slate-400 hover:text-white transition-all" 
-                                        data-url="${absoluteAssetUrl}" title="Copy direct S3 URL for streaming in QGIS">
-                                    <i data-lucide="copy" class="w-3.5 h-3.5"></i>
-                                </button>
-                                
-                                <!-- Force Binary Download Button -->
-                                <button class="download-binary-btn p-1.5 bg-indigo-900/40 hover:bg-indigo-600 rounded border border-indigo-700 text-indigo-300 hover:text-white transition-all" 
-                                        data-url="${absoluteAssetUrl}" data-filename="${item.id || 'collect'}_${key}" data-ext="${extension}" title="Force Download binary file to disk">
-                                    <i data-lucide="download" class="w-3.5 h-3.5"></i>
-                                </button>
-                            </div>
-                        `;
-                        assetsContainer.appendChild(assetRow);
-                    } catch (err) {
-                        console.error("Skipping malformed STAC asset row generation:", key, err);
+                    } catch (e) {
+                        pathname = String(absoluteAssetUrl).toLowerCase().trim();
                     }
+
+                    // Categorize Asset
+                    const isJson = pathname.endsWith('.json') || type.includes('json') || lowerKey.includes('json') || lowerKey === 'gjd';
+                    const isNitf = pathname.endsWith('.nitf') || pathname.endsWith('.ntf') || type.includes('nitf') || lowerKey.includes('sicd') || lowerKey.includes('sidd');
+                    const isHtmlViewer = pathname.endsWith('.html') || absoluteAssetUrl.includes('?prefix=');
+                    
+                    const isGeoTiff = !isJson && !isNitf && !isHtmlViewer && (
+                        pathname.endsWith('.tif') || 
+                        pathname.endsWith('.tiff') || 
+                        lowerKey.includes('gec') || 
+                        lowerKey.includes('tif') || 
+                        type.includes('tiff') || 
+                        type.includes('geotiff')
+                    );
+
+                    // Fetch custom descriptor and icon for GIS analysts
+                    const info = getAssetFriendlyInfo(key, asset, isGeoTiff, isJson, isNitf);
+
+                    const assetRow = document.createElement('div');
+                    assetRow.className = "flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-slate-950 hover:bg-slate-900 rounded-lg text-xs font-semibold text-slate-300 transition-all border border-slate-800 hover:border-indigo-500/30 gap-2";
+                    
+                    const mimeTypeStr = (typeof asset.type === 'string' && asset.type.includes('/')) ? asset.type.split('/').pop().toUpperCase() : "DATA";
+
+                    assetRow.innerHTML = `
+                        <div class="flex items-start gap-2.5 truncate w-full sm:w-auto">
+                            <i data-lucide="${info.icon}" class="w-4 h-4 text-indigo-400 shrink-0 mt-0.5"></i>
+                            <div class="truncate">
+                                <span class="block text-slate-200 font-semibold truncate text-left">${info.label}</span>
+                                <span class="block text-[10px] text-slate-400 font-normal truncate mt-0.5 text-left">${info.description}</span>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                            <span class="text-[9px] ${info.badgeColor} px-1.5 py-0.5 rounded uppercase font-mono">${mimeTypeStr}</span>
+                            
+                            <!-- Dynamic Play/Monitor Icon to Stream GeoTIFF directly to client map -->
+                            ${isGeoTiff ? `
+                            <button class="stream-raster-btn p-1.5 bg-indigo-600 hover:bg-indigo-500 rounded border border-indigo-500 text-white transition-all shadow-sm"
+                                    data-url="${absoluteAssetUrl}" title="Stream raw GeoTIFF directly onto this web map">
+                                <i data-lucide="monitor-play" class="w-3.5 h-3.5"></i>
+                            </button>
+                            ` : ''}
+
+                            <!-- Copy URL Button -->
+                            <button class="copy-url-btn p-1.5 bg-slate-900 hover:bg-slate-800 rounded border border-slate-700 text-slate-400 hover:text-white transition-all" 
+                                    data-url="${absoluteAssetUrl}" title="Copy direct S3 URL for streaming in QGIS">
+                                <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+                            </button>
+                            
+                            <!-- Force Binary Download Button -->
+                            <button class="download-binary-btn p-1.5 bg-indigo-900/40 hover:bg-indigo-600 rounded border border-indigo-700 text-indigo-300 hover:text-white transition-all" 
+                                    data-url="${absoluteAssetUrl}" data-filename="${item.id || 'collect'}_${key}" data-ext="${extension}" title="Force Download binary file to disk">
+                                <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                            </button>
+                        </div>
+                    `;
+                    assetsContainer.appendChild(assetRow);
                 });
 
                 // Attach GeoTIFF stream on demand handlers
@@ -1625,6 +1612,8 @@
                         forceDownloadAsset(url, filename, ext, btn);
                     });
                 });
+            } else {
+                assetsContainer.innerHTML = '<p class="text-xs text-slate-500">No assets found in STAC metadata.</p>';
             }
 
             lucide.createIcons();
