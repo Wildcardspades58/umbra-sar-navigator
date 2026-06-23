@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Umbra SAR STAC Catalog Navigator</title>
+    <!-- Inline SVG Favicon to prevent 404 errors -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛰️</text></svg>">
+    
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Leaflet CSS -->
@@ -284,15 +287,27 @@
                     </div>
 
                     <div id="item-details-panel" class="hidden space-y-4">
+                        
+                        <!-- Primary Prominent Action: Stream GeoTIFF -->
+                        <div id="primary-stream-container" class="hidden bg-indigo-950/40 rounded-xl p-4 border border-indigo-500/40">
+                            <h3 class="text-xs font-bold uppercase tracking-wider text-indigo-300 mb-2 flex items-center gap-1.5">
+                                <i data-lucide="satellite" class="w-3.5 h-3.5"></i> Primary Analysis Asset
+                            </h3>
+                            <button id="primary-stream-btn" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold py-2.5 px-4 rounded-lg flex items-center justify-center gap-2 transition-all shadow-lg shadow-indigo-900/20 border border-indigo-500">
+                                <i data-lucide="monitor-play" class="w-4 h-4"></i>
+                                Stream High-Res GeoTIFF to Map
+                            </button>
+                        </div>
+
                         <!-- Quicklook Section -->
                         <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-3">
                             <div class="flex items-center justify-between">
                                 <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">SAR Quicklook Preview</h3>
-                                <span id="raster-layer-status" class="text-[10px] px-2 py-0.5 bg-indigo-950 text-indigo-400 border border-indigo-900/30 rounded hidden animate-pulse">Raster Active</span>
+                                <span id="raster-layer-status" class="text-[10px] px-2 py-0.5 bg-indigo-950 text-indigo-400 border border-indigo-900/30 rounded hidden animate-pulse">GeoTIFF Stream Active</span>
                             </div>
                             
                             <div class="relative group rounded-lg overflow-hidden border border-slate-800 bg-slate-900 max-h-64 flex items-center justify-center">
-                                <img id="detail-thumbnail" src="" class="max-h-60 object-contain w-full transition-transform duration-300 group-hover:scale-105" alt="SAR Thumbnail">
+                                <img id="detail-thumbnail" src="" onerror="this.classList.add('hidden')" class="max-h-60 object-contain w-full transition-transform duration-300 group-hover:scale-105" alt="SAR Thumbnail">
                                 <div class="absolute inset-0 bg-gradient-to-t from-slate-950 via-transparent to-transparent opacity-40"></div>
                             </div>
 
@@ -309,7 +324,7 @@
                                 </div>
                                 <div class="space-y-1">
                                     <div class="flex justify-between text-[11px] text-slate-400">
-                                        <span>Overlay Layer Opacity</span>
+                                        <span>Map Layer Opacity</span>
                                         <span id="opacity-label" class="font-mono text-indigo-400">70%</span>
                                     </div>
                                     <input type="range" id="overlay-opacity" min="10" max="100" value="70"
@@ -476,6 +491,16 @@
         let incidenceChartInstance = null;
         let polarizationChartInstance = null;
         let platformChartInstance = null;
+
+        // General URL Translator (turns S3 paths into Web URLs and normalizes host paths for CORS)
+        function translateS3Url(rawHref, sourceUrl) {
+            if (!rawHref) return "";
+            if (rawHref.startsWith('s3://')) {
+                const s3Path = rawHref.replace('s3://', ''); // e.g. umbra-open-data-catalog/sar-data/...
+                return `https://s3.us-west-2.amazonaws.com/${s3Path}`;
+            }
+            return new URL(rawHref, sourceUrl).href;
+        }
 
         window.onload = function() {
             // Detect if running locally on file:// protocol
@@ -999,7 +1024,7 @@
         }
 
         // Helper mapper to explain SAR format structures clearly in details list
-        function getAssetFriendlyInfo(key, asset, isGeoTiff) {
+        function getAssetFriendlyInfo(key, asset, isGeoTiff, isJson, isNitf) {
             const lowerKey = key.toLowerCase();
             
             let label = asset.title || key;
@@ -1007,19 +1032,29 @@
             let icon = "file-down";
             let badgeColor = "bg-indigo-950 text-indigo-300 border border-indigo-900/30";
 
-            if (lowerKey === 'gjd') {
-                label = "Geocoded Joint Dataset (GJD)";
+            if (isJson) {
+                label = key.toUpperCase() + " Metadata";
                 description = "JSON text parameters containing target telemetry";
                 icon = "braces";
                 badgeColor = "bg-amber-950/40 text-amber-400 border border-amber-500/20";
-            } else if (lowerKey === 'sicd') {
+            } else if (lowerKey === 'sicd' || (isNitf && lowerKey.includes('sicd'))) {
                 label = "Sensor Independent Coherent Data (SICD)";
                 description = "Raw complex raster container (NITF format) — Stream/Drag to QGIS";
                 icon = "binary";
                 badgeColor = "bg-emerald-950/40 text-emerald-400 border border-emerald-500/20";
-            } else if (lowerKey === 'sidd') {
+            } else if (lowerKey === 'sidd' || (isNitf && lowerKey.includes('sidd'))) {
                 label = "Sensor Independent Derived Data (SIDD)";
                 description = "Detected amplitude raster container (NITF format) — Stream/Drag to QGIS";
+                icon = "image";
+                badgeColor = "bg-emerald-950/40 text-emerald-400 border border-emerald-500/20";
+            } else if (isNitf) {
+                label = "Raw NITF Raster";
+                description = "Military/Intelligence raster container — Load in QGIS";
+                icon = "binary";
+                badgeColor = "bg-emerald-950/40 text-emerald-400 border border-emerald-500/20";
+            } else if (isGeoTiff || lowerKey === 'gec') {
+                label = "GeoTIFF Image Raster";
+                description = "Standard GIS imagery band — Stream directly to canvas / QGIS";
                 icon = "image";
                 badgeColor = "bg-emerald-950/40 text-emerald-400 border border-emerald-500/20";
             } else if (lowerKey === 'rendered_preview' || lowerKey === 'thumbnail') {
@@ -1027,11 +1062,6 @@
                 description = "Processed PNG used for in-map canvas projection overlays";
                 icon = "eye";
                 badgeColor = "bg-blue-950/40 text-blue-400 border border-blue-500/20";
-            } else if (isGeoTiff) {
-                label = "GeoTIFF Image Raster";
-                description = "Standard GIS imagery band — Stream directly to canvas / QGIS";
-                icon = "image";
-                badgeColor = "bg-emerald-950/40 text-emerald-400 border border-emerald-500/20";
             }
 
             return { label, description, icon, badgeColor };
@@ -1117,7 +1147,7 @@
             
             // Show loading spinner on button
             const originalContent = btnElement.innerHTML;
-            btnElement.innerHTML = `<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin text-indigo-400"></i>`;
+            btnElement.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-white"></i> Streaming Raster...`;
             lucide.createIcons();
             btnElement.disabled = true;
 
@@ -1155,7 +1185,7 @@
 
                 // Check if we received an XML error page instead of binary data (starts with '<' or '<?xml')
                 if (firstBytes[0] === 0x3C) {
-                    throw new Error(`AWS S3 returned an Access Denied or CORS block.\n\nTarget URL: ${url}\nReceived Hex: [${hexBytes}]\nReceived ASCII: "${asciiBytes}"\n\nYour local browser's CORS sandbox blocked this stream. If you are running this app off a local disk file (file://), open terminal in the directory and launch a server: python3 -m http.server 8000`);
+                    throw new Error(`AWS S3 returned an Access Denied or CORS block.\n\nTarget URL: ${url}\nReceived Hex: [${hexBytes}]\nReceived ASCII: "${asciiBytes}"\n\nYour local browser's CORS sandbox blocked this stream. Ensure your origin is whitelisted or run this file on a secure web host.`);
                 }
 
                 // Robust check: supports Standard TIFF (42) and BigTIFF (43) for both Little and Big Endian formats
@@ -1231,7 +1261,7 @@
                 document.getElementById('raster-layer-status').classList.remove('hidden');
                 document.getElementById('status-text').innerText = `${tiffType} stream active`;
                 
-                btnElement.innerHTML = `<i data-lucide="check" class="w-3.5 h-3.5 text-emerald-400"></i>`;
+                btnElement.innerHTML = `<i data-lucide="check-circle" class="w-4 h-4 text-emerald-300"></i> Stream Live`;
                 lucide.createIcons();
 
                 setTimeout(() => {
@@ -1244,7 +1274,7 @@
                 console.error("GeoTIFF streaming failed: ", err);
                 document.getElementById('status-text').innerText = "Raster stream failed.";
                 
-                btnElement.innerHTML = `<i data-lucide="alert-circle" class="w-3.5 h-3.5 text-red-500"></i>`;
+                btnElement.innerHTML = `<i data-lucide="alert-circle" class="w-4 h-4 text-red-300"></i> Stream Error`;
                 lucide.createIcons();
 
                 notify("GeoTIFF Streaming Interrupted", err.message);
@@ -1301,12 +1331,51 @@
 
             // Quicklook Image search inside STAC properties
             let quicklookUrl = "";
+            let primaryGeoTiffUrl = null;
+            let geoTiffItemTitle = "GeoTIFF Asset";
+
             if (item.assets) {
-                const keys = Object.keys(item.assets);
-                const bestKey = keys.find(k => k === 'rendered_preview') || keys.find(k => k === 'thumbnail') || keys.find(k => item.assets[k].type?.includes('image/'));
-                if (bestKey) {
-                    // Resolve relative quicklook URLs using absolute source path
-                    quicklookUrl = new URL(item.assets[bestKey].href, item.sourceUrl).href;
+                // First pass: highly rigorous scan for images to avoid raw .tif or .json breaks
+                for (const [key, asset] of Object.entries(item.assets)) {
+                    const href = asset.href || "";
+                    const lowerHref = href.toLowerCase();
+                    const type = (asset.type || "").toLowerCase();
+                    const lowerKey = key.toLowerCase();
+                    
+                    const absoluteUrl = translateS3Url(href, item.sourceUrl);
+                    
+                    // Exclude pure JSON/NITF from being treated as GeoTIFF or Image
+                    const isJson = lowerHref.includes('.json') || type.includes('json');
+                    const isNitf = lowerHref.includes('.nitf') || lowerHref.includes('.ntf') || type.includes('nitf');
+                    
+                    // Detect GeoTIFF
+                    const isGeoTiff = !isJson && !isNitf && (
+                        lowerHref.includes('.tif') || 
+                        lowerHref.includes('.tiff') || 
+                        type.includes('tiff') || 
+                        lowerKey.includes('geotiff') ||
+                        lowerKey === 'gec' // GEC is Geocoded Ellipsoid Corrected (GeoTIFF)
+                    );
+                    
+                    if (isGeoTiff && !primaryGeoTiffUrl) {
+                        primaryGeoTiffUrl = absoluteUrl;
+                        geoTiffItemTitle = asset.title || key;
+                    }
+                    
+                    // Detect Quicklook/Thumbnail (must explicitly be a valid web image format)
+                    const isPreviewImage = !isJson && !isNitf && !isGeoTiff && (
+                        lowerHref.includes('.png') || 
+                        lowerHref.includes('.jpg') || 
+                        lowerHref.includes('.jpeg') || 
+                        type.includes('png') || 
+                        type.includes('jpeg') || 
+                        lowerKey.includes('preview') || 
+                        lowerKey.includes('thumbnail')
+                    );
+                    
+                    if (isPreviewImage && !quicklookUrl) {
+                        quicklookUrl = absoluteUrl;
+                    }
                 }
             }
 
@@ -1316,6 +1385,24 @@
                 thumbnailEl.classList.remove('hidden');
             } else {
                 thumbnailEl.classList.add('hidden');
+            }
+
+            // Set up Primary Prominent Stream Button
+            const primaryStreamContainer = document.getElementById('primary-stream-container');
+            const primaryStreamBtn = document.getElementById('primary-stream-btn');
+            
+            // Deep clone button to wipe old event listeners cleanly
+            const newPrimaryBtn = primaryStreamBtn.cloneNode(true);
+            primaryStreamBtn.parentNode.replaceChild(newPrimaryBtn, primaryStreamBtn);
+
+            if (primaryGeoTiffUrl) {
+                primaryStreamContainer.classList.remove('hidden');
+                newPrimaryBtn.innerHTML = `<i data-lucide="monitor-play" class="w-4 h-4"></i> Stream ${geoTiffItemTitle} to Map`;
+                newPrimaryBtn.addEventListener('click', (e) => {
+                    streamGeoTiffToMap(primaryGeoTiffUrl, newPrimaryBtn);
+                });
+            } else {
+                primaryStreamContainer.classList.add('hidden');
             }
 
             // Populate metadata slots
@@ -1337,23 +1424,19 @@
             document.getElementById('det-azimuth').innerText = props["umbra:target_azimuth_angle_degrees"] ? `${parseFloat(props["umbra:target_azimuth_angle_degrees"]).toFixed(1)}°` : "N/A";
             document.getElementById('det-id').innerText = props["umbra:task_id"] || item.id || "N/A";
 
-            // Populate Assets Download Buttons
+            // Populate Assets Download Links
             const assetsContainer = document.getElementById('detail-assets-list');
             assetsContainer.innerHTML = "";
 
             if (item.assets) {
                 Object.keys(item.assets).forEach(key => {
                     const asset = item.assets[key];
+                    const lowerKey = key.toLowerCase();
+                    const type = (asset.type || "").toLowerCase();
+                    const href = asset.href || "";
+                    const lowerHref = href.toLowerCase();
                     
-                    // Native S3 Path Translator
-                    let absoluteAssetUrl = asset.href;
-                    if (absoluteAssetUrl.startsWith('s3://')) {
-                        const s3Path = absoluteAssetUrl.replace('s3://', '');
-                        absoluteAssetUrl = `https://s3.us-west-2.amazonaws.com/${s3Path}`;
-                    } else {
-                        // Resolve relative files using standard Web URL api
-                        absoluteAssetUrl = new URL(asset.href, item.sourceUrl).href;
-                    }
+                    const absoluteAssetUrl = translateS3Url(href, item.sourceUrl);
 
                     // Extract actual filepath safely to avoid STAC typo anomalies
                     let extension = ".bin";
@@ -1369,11 +1452,14 @@
                         pathname = absoluteAssetUrl.toLowerCase();
                     }
 
+                    const isJson = pathname.endsWith('.json') || type.includes('json');
+                    const isNitf = pathname.endsWith('.nitf') || pathname.endsWith('.ntf') || type.includes('nitf');
+                    
                     // STRICT GeoTIFF Checker (Ignores misleading catalog MIME types and prevents JSON parsing crashes)
-                    const isGeoTiff = (pathname.endsWith('.tif') || pathname.endsWith('.tiff')) && !pathname.endsWith('.json');
+                    const isGeoTiff = !isJson && !isNitf && (lowerKey === 'geotiff' || lowerKey === 'gec' || type.includes('tiff') || pathname.endsWith('.tif') || pathname.endsWith('.tiff'));
 
                     // Fetch custom descriptor and icon for GIS analysts
-                    const info = getAssetFriendlyInfo(key, asset, isGeoTiff);
+                    const info = getAssetFriendlyInfo(key, asset, isGeoTiff, isJson, isNitf);
 
                     const assetRow = document.createElement('div');
                     assetRow.className = "flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-slate-950 hover:bg-slate-900 rounded-lg text-xs font-semibold text-slate-300 transition-all border border-slate-800 hover:border-indigo-500/30 gap-2";
@@ -1487,15 +1573,19 @@
             let imageUrl = "";
             if (selectedItem.assets) {
                 const keys = Object.keys(selectedItem.assets);
-                const bestKey = keys.find(k => k === 'rendered_preview') || keys.find(k => k === 'thumbnail') || keys.find(k => selectedItem.assets[k].type?.includes('image/'));
+                const bestKey = keys.find(k => k === 'rendered_preview') || 
+                                keys.find(k => k === 'thumbnail') || 
+                                keys.find(k => {
+                                    const t = (selectedItem.assets[k].type || "").toLowerCase();
+                                    return t === 'image/png' || t === 'image/jpeg' || t === 'image/jpg';
+                                });
                 if (bestKey) {
-                    // Resolve relative thumbnail images as well
-                    imageUrl = new URL(selectedItem.assets[bestKey].href, selectedItem.sourceUrl).href;
+                    imageUrl = translateS3Url(selectedItem.assets[bestKey].href, selectedItem.sourceUrl);
                 }
             }
 
             if (!imageUrl) {
-                notify("Asset Error", "No image Quicklook preview URL located in this footprint's STAC assets.");
+                notify("Asset Error", "No valid image Quicklook preview URL located in this footprint's STAC assets.");
                 document.getElementById('overlay-map-toggle').checked = false;
                 return;
             }
