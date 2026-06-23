@@ -4,23 +4,15 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Umbra SAR STAC Catalog Navigator</title>
-    <!-- Inline SVG Favicon to prevent 404 errors -->
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛰️</text></svg>">
     
-    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <!-- Leaflet JS -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <!-- Chart.js for SAR analysis charts -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <!-- Lucide Icons -->
     <script src="https://unpkg.com/lucide@latest"></script>
     
-    <!-- Proj4js for client-side coordinate reprojection (UTM to Web Mercator) -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.15.0/proj4.js"></script>
-    <!-- GeoRaster Parsing & Rendering Libraries -->
     <script src="https://unpkg.com/georaster"></script>
     <script src="https://unpkg.com/georaster-layer-for-leaflet/dist/georaster-layer-for-leaflet.min.js"></script>
     
@@ -47,7 +39,6 @@
 </head>
 <body class="bg-slate-950 text-slate-100 h-full flex flex-col font-sans overflow-hidden">
 
-    <!-- Browser Sandbox/CORS Warning Banner (Conditionally Rendered) -->
     <div id="local-protocol-warning" class="hidden bg-amber-950/85 border-b border-amber-800/50 px-6 py-2.5 flex items-center justify-between text-xs text-amber-200 z-50 transition-all shrink-0">
         <div class="flex items-center gap-2 max-w-[85%]">
             <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-400 shrink-0"></i>
@@ -63,7 +54,6 @@
         </button>
     </div>
 
-    <!-- Top Navigation Header -->
     <header class="bg-slate-900 border-b border-slate-800 px-6 py-4 flex flex-col md:flex-row justify-between items-center gap-4 shrink-0 z-10 shadow-lg">
         <div class="flex items-center gap-3">
             <div class="p-2 bg-indigo-600/20 text-indigo-400 rounded-lg border border-indigo-500/30">
@@ -78,7 +68,6 @@
             </div>
         </div>
 
-        <!-- Connection / Loader Bar -->
         <div class="flex flex-col sm:flex-row items-center gap-2 w-full md:w-auto max-w-xl shrink font-medium">
             <div class="relative flex-1 w-full sm:w-80">
                 <span class="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-400">
@@ -95,12 +84,9 @@
         </div>
     </header>
 
-    <!-- Main Workspace Container -->
     <main class="flex-1 flex flex-col lg:flex-row overflow-hidden relative">
 
-        <!-- Sidebar / Controls Grid -->
         <aside id="sidebar" class="w-full lg:w-[480px] bg-slate-900 border-b lg:border-b-0 lg:border-r border-slate-800 flex flex-col h-1/2 lg:h-full transition-all duration-300 z-10 shrink-0">
-            <!-- Sidebar Navigation Tabs -->
             <div class="flex border-b border-slate-800 bg-slate-900/50 text-sm font-medium shrink-0">
                 <button id="tab-browse-btn" class="flex-1 py-3 px-4 border-b-2 border-indigo-500 text-indigo-400 flex items-center justify-center gap-2 hover:bg-slate-800/30 transition-all">
                     <i data-lucide="folder-tree" class="w-4 h-4"></i> Explorer
@@ -113,17 +99,13 @@
                 </button>
             </div>
 
-            <!-- Tab Contents Wrapper -->
             <div class="flex-1 overflow-y-auto p-4 space-y-4">
 
-                <!-- TAB 1: STAC EXPLORER & TREE -->
                 <div id="tab-browse" class="space-y-4">
-                    <!-- Dynamic Breadcrumbs -->
                     <div id="breadcrumbs" class="text-xs text-indigo-400 bg-indigo-950/20 border border-indigo-900/30 rounded-lg p-2.5 flex items-center flex-wrap gap-1">
                         <span class="text-slate-400">Loading catalog...</span>
                     </div>
 
-                    <!-- Crawler Status & Actions -->
                     <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-3">
                         <div class="flex justify-between items-center">
                             <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Deep-Scan Static Catalog</h3>
@@ -146,7 +128,6 @@
                             </div>
                         </div>
 
-                        <!-- Progress Bar (hidden unless active) -->
                         <div id="crawl-progress-container" class="space-y-1.5 hidden">
                             <div class="flex justify-between text-[11px]">
                                 <span id="crawl-progress-text" class="text-indigo-400 font-medium">Scanning folders...</span>
@@ -168,45 +149,37 @@
                         </div>
                     </div>
 
-                    <!-- Explorer Navigation Tree -->
                     <div class="space-y-2">
                         <div class="flex justify-between items-center px-1">
                             <span class="text-xs font-semibold text-slate-400">Folder Navigation</span>
                             <span id="folder-count" class="text-[10px] text-indigo-400"></span>
                         </div>
                         <div id="stac-tree-list" class="bg-slate-950 border border-slate-800 rounded-xl divide-y divide-slate-900 max-h-60 overflow-y-auto">
-                            <!-- Populated dynamically -->
                             <p class="text-xs text-slate-500 p-4 text-center">Loading STAC index...</p>
                         </div>
                     </div>
 
-                    <!-- Discovered Collects List -->
                     <div class="space-y-2 flex-1">
                         <div class="flex justify-between items-center px-1">
                             <span class="text-xs font-semibold text-slate-400">Loaded footprint items</span>
                             <span id="loaded-items-count" class="text-xs bg-slate-800 text-indigo-400 px-2 py-0.5 rounded-full font-mono">0</span>
                         </div>
                         <div id="collects-list" class="bg-slate-950 border border-slate-800 rounded-xl divide-y divide-slate-900 max-h-72 overflow-y-auto">
-                            <!-- Populated dynamically -->
                             <p class="text-xs text-slate-500 p-4 text-center">No footprints loaded yet. Scan or explore to load items.</p>
                         </div>
                     </div>
                 </div>
 
-                <!-- TAB 2: QUERY, FILTERS & Analytics -->
                 <div id="tab-filter" class="hidden space-y-4">
-                    <!-- Advanced Filters Panel -->
                     <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-4">
                         <h3 class="text-xs font-bold uppercase tracking-wider text-indigo-400">Interactive Filter Panel</h3>
                         
-                        <!-- Search Filter -->
                         <div>
                             <label class="block text-xs text-slate-400 mb-1">Search Identifier / Location</label>
                             <input type="text" id="filter-search" placeholder="Type to filter..." 
                                    class="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500">
                         </div>
 
-                        <!-- Incidence Angle range -->
                         <div>
                             <div class="flex justify-between text-xs text-slate-400 mb-1">
                                 <span>Incidence Angle Limit</span>
@@ -220,7 +193,6 @@
                             </div>
                         </div>
 
-                        <!-- Polarization filter -->
                         <div>
                             <label class="block text-xs text-slate-400 mb-1.5">Polarization Channel</label>
                             <div class="flex gap-4">
@@ -235,7 +207,6 @@
                             </div>
                         </div>
 
-                        <!-- Platform filter -->
                         <div>
                             <label class="block text-xs text-slate-400 mb-1">Satellite Platform</label>
                             <select id="filter-platform" class="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500">
@@ -244,7 +215,6 @@
                         </div>
                     </div>
 
-                    <!-- Statistics Dashboard (Charts) -->
                     <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-4">
                         <div class="flex justify-between items-center">
                             <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">SAR Statistical Charts</h3>
@@ -253,7 +223,6 @@
                             </button>
                         </div>
 
-                        <!-- Incidence Angle Histogram Chart -->
                         <div class="space-y-1">
                             <span class="text-[11px] text-slate-400">Incidence Angle Distribution</span>
                             <div class="relative h-40 w-full bg-slate-900/50 rounded-lg p-2 border border-slate-800/50">
@@ -261,7 +230,6 @@
                             </div>
                         </div>
 
-                        <!-- Polarization Pie Chart -->
                         <div class="grid grid-cols-2 gap-3">
                             <div class="space-y-1">
                                 <span class="text-[11px] text-slate-400">Polarizations</span>
@@ -279,7 +247,6 @@
                     </div>
                 </div>
 
-                <!-- TAB 3: COLLECT DETAILS -->
                 <div id="tab-details" class="hidden space-y-4">
                     <div id="no-item-selected" class="text-center py-12 text-slate-500">
                         <i data-lucide="info" class="w-10 h-10 mx-auto text-slate-600 mb-3"></i>
@@ -288,7 +255,6 @@
 
                     <div id="item-details-panel" class="hidden space-y-4">
                         
-                        <!-- Primary Prominent Action: Stream GeoTIFF -->
                         <div id="primary-stream-container" class="hidden bg-indigo-950/40 rounded-xl p-4 border border-indigo-500/40">
                             <h3 class="text-xs font-bold uppercase tracking-wider text-indigo-300 mb-2 flex items-center gap-1.5">
                                 <i data-lucide="satellite" class="w-3.5 h-3.5"></i> Primary Analysis Asset
@@ -299,7 +265,6 @@
                             </button>
                         </div>
 
-                        <!-- Quicklook Section -->
                         <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-3">
                             <div class="flex items-center justify-between">
                                 <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">SAR Quicklook Preview</h3>
@@ -311,7 +276,6 @@
                                 <div class="absolute inset-0 bg-gradient-to-t from-slate-950 via-transparent to-transparent opacity-40"></div>
                             </div>
 
-                            <!-- Map Overlay Projections Controls -->
                             <div class="bg-slate-900 rounded-lg p-3 border border-slate-800 space-y-2.5">
                                 <div class="flex items-center justify-between">
                                     <span class="text-xs font-semibold text-slate-300 flex items-center gap-1.5 flex-wrap">
@@ -333,7 +297,6 @@
                             </div>
                         </div>
 
-                        <!-- SAR Geometries / Collector Parameters -->
                         <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-3">
                             <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Radar & View Geometry</h3>
                             <div class="grid grid-cols-2 gap-2 text-xs">
@@ -364,7 +327,6 @@
                             </div>
                         </div>
 
-                        <!-- Collection Attributes -->
                         <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-2">
                             <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Sensing Properties</h3>
                             <div class="space-y-1.5 text-xs text-slate-300">
@@ -391,19 +353,16 @@
                             </div>
                         </div>
 
-                        <!-- Data Assets Download Links -->
                         <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-2.5">
                             <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 font-semibold text-slate-300">Available SAR Deliverables</h3>
                             <div id="detail-assets-list" class="space-y-2">
-                                <!-- Assets buttons are appended here -->
-                            </div>
+                                </div>
                         </div>
                     </div>
                 </div>
 
             </div>
 
-            <!-- Bottom utility status/exports -->
             <div class="p-4 border-t border-slate-800 bg-slate-900/60 flex items-center justify-between text-xs shrink-0 font-medium">
                 <div class="flex items-center gap-2 text-slate-400">
                     <span id="active-marker" class="w-2.5 h-2.5 rounded-full bg-indigo-500 animate-pulse"></span>
@@ -420,17 +379,14 @@
             </div>
         </aside>
 
-        <!-- Leaflet Map Container -->
         <section id="map-container" class="flex-1 h-1/2 lg:h-full relative flex flex-col">
             <div id="map" class="w-full h-full"></div>
 
-            <!-- Float Info Overlay -->
             <div class="absolute bottom-4 left-4 z-[1000] bg-slate-950/90 backdrop-blur border border-slate-800 px-3 py-1.5 rounded-lg text-slate-300 text-xs font-mono shadow-xl flex items-center gap-2">
                 <span class="text-indigo-400"><i data-lucide="compass" class="w-3.5 h-3.5 inline"></i> Cursor:</span>
                 <span id="coord-tracker">0.00000°, 0.00000°</span>
             </div>
 
-            <!-- Floating Map Actions -->
             <div class="absolute top-4 right-4 z-[1000] flex flex-col gap-2">
                 <button id="btn-fit-bounds" title="Fit Map to Loaded Footprints" class="bg-slate-950/90 hover:bg-slate-900 border border-slate-800 text-slate-300 p-2.5 rounded-lg shadow-xl hover:text-white transition-all">
                     <i data-lucide="maximize" class="w-4 h-4"></i>
@@ -443,10 +399,8 @@
 
     </main>
 
-    <!-- Map/Basemap Controller Switcher (In-map Floating Overlay) -->
     <div id="map-control-box" class="hidden"></div>
 
-    <!-- Alert / Message Modal System -->
     <div id="modal-container" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[2000] hidden flex items-center justify-center p-4">
         <div class="bg-slate-900 border border-slate-800 max-w-md w-full rounded-xl p-5 space-y-4 shadow-2xl">
             <div class="flex items-center gap-3 text-amber-500">
@@ -462,7 +416,6 @@
         </div>
     </div>
 
-    <!-- Main JS Application Logic -->
     <script>
         // STAC Browser State Variables
         let activeCatalogUrl = "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/stac/catalog.json";
@@ -492,14 +445,26 @@
         let polarizationChartInstance = null;
         let platformChartInstance = null;
 
-        // General URL Translator (turns S3 paths into Web URLs and normalizes host paths for CORS)
+        // General URL Translator (converts s3:// paths and website endpoints to direct virtual-hosted AWS endpoints)
         function translateS3Url(rawHref, sourceUrl) {
             if (!rawHref) return "";
+            let finalUrl = rawHref;
+
             if (rawHref.startsWith('s3://')) {
-                const s3Path = rawHref.replace('s3://', ''); // e.g. umbra-open-data-catalog/sar-data/...
-                return `https://s3.us-west-2.amazonaws.com/${s3Path}`;
+                const parts = rawHref.replace('s3://', '').split('/');
+                const bucket = parts.shift();
+                const s3Path = parts.join('/');
+                finalUrl = `https://${bucket}.s3.us-west-2.amazonaws.com/${s3Path}`;
+            } else {
+                finalUrl = new URL(rawHref, sourceUrl).href;
             }
-            return new URL(rawHref, sourceUrl).href;
+
+            // Forcefully override HTML directory viewer links back to the direct binary REST endpoint
+            if (finalUrl.includes('.s3-website.')) {
+                finalUrl = finalUrl.replace('.s3-website.', '.s3.');
+            }
+
+            return finalUrl;
         }
 
         window.onload = function() {
@@ -1173,19 +1138,15 @@
                     throw new Error("S3 returned an empty file payload.");
                 }
                 const firstBytes = new Uint8Array(arrayBuffer.slice(0, 4));
-                
-                // Convert first 4 bytes to Hex and ASCII for informative debug dialogues
-                const hexBytes = Array.from(firstBytes).map(b => '0x' + b.toString(16).toUpperCase().padStart(2, '0')).join(', ');
                 const asciiBytes = Array.from(firstBytes).map(b => (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.').join('');
 
-                // Check if we accidentally fetched a JSON file
-                if (firstBytes[0] === 0x7B) {
-                    throw new Error(`Fetched asset is a JSON text file, not a GeoTIFF!\n\nTarget URL: ${url}\nReceived Hex: [${hexBytes}]\nReceived ASCII: "${asciiBytes}"\n\nThis means the metadata link for this asset points to a JSON manifest document instead of an image raster.`);
-                }
-
-                // Check if we received an XML error page instead of binary data (starts with '<' or '<?xml')
-                if (firstBytes[0] === 0x3C) {
-                    throw new Error(`AWS S3 returned an Access Denied or CORS block.\n\nTarget URL: ${url}\nReceived Hex: [${hexBytes}]\nReceived ASCII: "${asciiBytes}"\n\nYour local browser's CORS sandbox blocked this stream. Ensure your origin is whitelisted or run this file on a secure web host.`);
+                // Distinguish between HTML Webpages and XML Errors based on the first two bytes
+                if (firstBytes[0] === 0x3C) { // '<'
+                    if (firstBytes[1] === 0x21) { // '<!' e.g. <!DOCTYPE html>
+                        throw new Error(`The server returned an HTML webpage instead of a GeoTIFF image.\n\nReceived ASCII: "${asciiBytes}"\n\nThis means the catalog link points to a web viewer (like an S3 directory page) or your network proxy intercepted the request.`);
+                    } else { // '<?' e.g. <?xml
+                        throw new Error(`AWS S3 rejected the request and returned an XML error document.\n\nReceived ASCII: "${asciiBytes}"\n\nThis usually means 403 Access Denied or 404 Not Found on the bucket.`);
+                    }
                 }
 
                 // Robust check: supports Standard TIFF (42) and BigTIFF (43) for both Little and Big Endian formats
@@ -1216,7 +1177,7 @@
                 }
 
                 if (!isTiffMagic) {
-                    let errorDetail = `Fetched asset is not a valid GeoTIFF file.\nTarget URL: ${url}\nReceived Hex: [${hexBytes}]\nReceived ASCII: "${asciiBytes}"\n\n`;
+                    let errorDetail = `Fetched asset is not a valid GeoTIFF file.\nReceived ASCII: "${asciiBytes}"\n\n`;
                     if (firstBytes[0] === 0x4E && firstBytes[1] === 0x49 && firstBytes[2] === 0x54 && firstBytes[3] === 0x46) {
                         errorDetail += "The selected asset is a raw military NITF container (SICD/SIDD). In-browser Canvas engine only supports streaming Standard GeoTIFF formats. Please use QGIS to load raw NITFs directly.";
                     } else {
@@ -1344,18 +1305,22 @@
                     
                     const absoluteUrl = translateS3Url(href, item.sourceUrl);
                     
-                    // Exclude pure JSON/NITF from being treated as GeoTIFF or Image
-                    const isJson = lowerHref.includes('.json') || type.includes('json');
-                    const isNitf = lowerHref.includes('.nitf') || lowerHref.includes('.ntf') || type.includes('nitf');
+                    // Extract safe pathname to evaluate extensions accurately
+                    let pathname = "";
+                    try {
+                        const urlObj = new URL(absoluteUrl);
+                        pathname = urlObj.pathname.toLowerCase();
+                    } catch (e) {
+                        pathname = absoluteUrl.toLowerCase();
+                    }
                     
-                    // Detect GeoTIFF
-                    const isGeoTiff = !isJson && !isNitf && (
-                        lowerHref.includes('.tif') || 
-                        lowerHref.includes('.tiff') || 
-                        type.includes('tiff') || 
-                        lowerKey.includes('geotiff') ||
-                        lowerKey === 'gec' // GEC is Geocoded Ellipsoid Corrected (GeoTIFF)
-                    );
+                    // Exclude pure JSON/NITF/HTML from being treated as GeoTIFF or Image
+                    const isJson = pathname.endsWith('.json') || type.includes('json');
+                    const isNitf = pathname.endsWith('.nitf') || pathname.endsWith('.ntf') || type.includes('nitf');
+                    const isHtmlViewer = pathname.endsWith('.html') || absoluteUrl.includes('?prefix=');
+                    
+                    // Detect true GeoTIFF
+                    const isGeoTiff = !isJson && !isNitf && !isHtmlViewer && (pathname.endsWith('.tif') || pathname.endsWith('.tiff'));
                     
                     if (isGeoTiff && !primaryGeoTiffUrl) {
                         primaryGeoTiffUrl = absoluteUrl;
@@ -1363,14 +1328,12 @@
                     }
                     
                     // Detect Quicklook/Thumbnail (must explicitly be a valid web image format)
-                    const isPreviewImage = !isJson && !isNitf && !isGeoTiff && (
-                        lowerHref.includes('.png') || 
-                        lowerHref.includes('.jpg') || 
-                        lowerHref.includes('.jpeg') || 
+                    const isPreviewImage = !isJson && !isNitf && !isGeoTiff && !isHtmlViewer && (
+                        pathname.endsWith('.png') || 
+                        pathname.endsWith('.jpg') || 
+                        pathname.endsWith('.jpeg') || 
                         type.includes('png') || 
-                        type.includes('jpeg') || 
-                        lowerKey.includes('preview') || 
-                        lowerKey.includes('thumbnail')
+                        type.includes('jpeg')
                     );
                     
                     if (isPreviewImage && !quicklookUrl) {
@@ -1431,10 +1394,8 @@
             if (item.assets) {
                 Object.keys(item.assets).forEach(key => {
                     const asset = item.assets[key];
-                    const lowerKey = key.toLowerCase();
                     const type = (asset.type || "").toLowerCase();
                     const href = asset.href || "";
-                    const lowerHref = href.toLowerCase();
                     
                     const absoluteAssetUrl = translateS3Url(href, item.sourceUrl);
 
@@ -1454,9 +1415,10 @@
 
                     const isJson = pathname.endsWith('.json') || type.includes('json');
                     const isNitf = pathname.endsWith('.nitf') || pathname.endsWith('.ntf') || type.includes('nitf');
+                    const isHtmlViewer = pathname.endsWith('.html') || absoluteAssetUrl.includes('?prefix=');
                     
-                    // STRICT GeoTIFF Checker (Ignores misleading catalog MIME types and prevents JSON parsing crashes)
-                    const isGeoTiff = !isJson && !isNitf && (lowerKey === 'geotiff' || lowerKey === 'gec' || type.includes('tiff') || pathname.endsWith('.tif') || pathname.endsWith('.tiff'));
+                    // STRICT GeoTIFF Checker
+                    const isGeoTiff = !isJson && !isNitf && !isHtmlViewer && (pathname.endsWith('.tif') || pathname.endsWith('.tiff'));
 
                     // Fetch custom descriptor and icon for GIS analysts
                     const info = getAssetFriendlyInfo(key, asset, isGeoTiff, isJson, isNitf);
@@ -1477,7 +1439,6 @@
                         <div class="flex items-center gap-2 shrink-0 self-end sm:self-center">
                             <span class="text-[9px] ${info.badgeColor} px-1.5 py-0.5 rounded uppercase font-mono">${mimeTypeStr}</span>
                             
-                            <!-- Dynamic Play/Monitor Icon to Stream GeoTIFF directly to client map -->
                             ${isGeoTiff ? `
                             <button class="stream-raster-btn p-1.5 bg-indigo-650 hover:bg-indigo-500 rounded border border-indigo-600 text-white transition-all"
                                     data-url="${absoluteAssetUrl}" title="Stream raw GeoTIFF directly onto this web map">
@@ -1485,13 +1446,11 @@
                             </button>
                             ` : ''}
 
-                            <!-- Copy URL Button (Ideal for Cloud Optimized GeoTIFF/NITF Streaming directly to QGIS) -->
                             <button class="copy-url-btn p-1.5 bg-slate-900 hover:bg-slate-800 rounded border border-slate-700 text-slate-400 hover:text-white transition-all" 
                                     data-url="${absoluteAssetUrl}" title="Copy direct S3 URL for streaming in QGIS">
                                 <i data-lucide="copy" class="w-3.5 h-3.5"></i>
                             </button>
                             
-                            <!-- Force Binary Download Button -->
                             <button class="download-binary-btn p-1.5 bg-indigo-900/40 hover:bg-indigo-600 rounded border border-indigo-700 text-indigo-300 hover:text-white transition-all" 
                                     data-url="${absoluteAssetUrl}" data-filename="${item.id || 'collect'}_${key}" data-ext="${extension}" title="Force Download binary file to disk">
                                 <i data-lucide="download" class="w-3.5 h-3.5"></i>
