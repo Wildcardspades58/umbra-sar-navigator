@@ -52,7 +52,7 @@
                 <strong>Running via local file path (CORS Sandbox Alert):</strong> 
                 Web browsers strictly block local files from streaming binary data (GeoTIFFs) from external AWS S3 servers. 
                 The <strong>Project Quicklook PNG</strong> overlay will work, but to stream raw <strong>GeoTIFFs</strong>, 
-                run this file using a simple local web server (e.g. <code class="bg-slate-950/80 px-1 py-0.5 rounded font-mono text-amber-300">python3 -m http.server</code>).
+                run this file using a simple local web server or host on GitHub Pages.
             </span>
         </div>
         <button onclick="document.getElementById('local-protocol-warning').classList.add('hidden')" class="hover:text-white p-1 text-amber-400">
@@ -190,7 +190,7 @@
                     </div>
                 </div>
 
-                <!-- TAB 2: QUERY, FILTERS & ANALYTICS -->
+                <!-- TAB 2: QUERY, FILTERS & Analytics -->
                 <div id="tab-filter" class="hidden space-y-4">
                     <!-- Advanced Filters Panel -->
                     <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-4">
@@ -1001,7 +1001,6 @@
         // Helper mapper to explain SAR format structures clearly in details list
         function getAssetFriendlyInfo(key, asset, isGeoTiff) {
             const lowerKey = key.toLowerCase();
-            const type = (asset.type || "").toLowerCase();
             
             let label = asset.title || key;
             let description = "Direct Data Stream";
@@ -1030,7 +1029,7 @@
                 badgeColor = "bg-blue-950/40 text-blue-400 border border-blue-500/20";
             } else if (isGeoTiff) {
                 label = "GeoTIFF Image Raster";
-                description = "Standard GIS imagery band — Stream/Drag directly to QGIS";
+                description = "Standard GIS imagery band — Stream directly to canvas / QGIS";
                 icon = "image";
                 badgeColor = "bg-emerald-950/40 text-emerald-400 border border-emerald-500/20";
             }
@@ -1050,7 +1049,11 @@
 
             try {
                 const response = await fetch(url);
-                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                if (!response.ok) {
+                    if (response.status === 404) throw new Error("404 Not Found: The file was not found on the AWS S3 bucket.");
+                    if (response.status === 403) throw new Error("403 Forbidden: AWS blocked access to this file.");
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
                 const blob = await response.blob();
                 
                 // Re-package as raw binary stream to bypass browser's MIME extension forcing
@@ -1095,9 +1098,8 @@
                 lucide.createIcons();
                 
                 notify("Direct Binary Fetch Blocked", 
-                    "The browser's security rules (CORS) prevented downloading the raw binary directly via JavaScript. " +
-                    "This typically happens if you are running this page locally via a direct file path.\n\n" +
-                    "We have opened the download link in a new tab as a fallback.\n\n" +
+                    `${err.message}\n\n` +
+                    "If this is a CORS security rule block, we have opened the download link in a new tab as a fallback.\n\n" +
                     "Highly Recommended for QGIS: Click the 'Copy direct S3 URL' button instead, then in QGIS add a Raster Layer using 'Protocol: HTTP/Cloud/S3' with the copied link!"
                 );
 
@@ -1125,7 +1127,15 @@
 
                 // Fetch arraybuffer bytes directly from AWS S3
                 const response = await fetch(url);
-                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        throw new Error(`404 Not Found: The STAC catalog references this asset, but the physical file does not actually exist on the AWS S3 bucket. (Target: ${url})`);
+                    } else if (response.status === 403) {
+                        throw new Error(`403 Forbidden: AWS blocked access to this file. (Target: ${url})`);
+                    }
+                    throw new Error(`HTTP error! status: ${response.status} on ${url}`);
+                }
+                
                 const arrayBuffer = await response.arrayBuffer();
 
                 // CRITICAL SAFETY CHECK: Inspect magic bytes to prevent georaster from throwing "Invalid byte order value"
@@ -1334,42 +1344,36 @@
             if (item.assets) {
                 Object.keys(item.assets).forEach(key => {
                     const asset = item.assets[key];
-                    const lowerKey = key.toLowerCase();
-                    const type = (asset.type || "").toLowerCase();
-                    const lowerHref = asset.href.toLowerCase();
                     
                     // Native S3 Path Translator
-                    // Allows strict routing to standard AWS bucket schemas
                     let absoluteAssetUrl = asset.href;
                     if (absoluteAssetUrl.startsWith('s3://')) {
                         const s3Path = absoluteAssetUrl.replace('s3://', '');
                         absoluteAssetUrl = `https://s3.us-west-2.amazonaws.com/${s3Path}`;
                     } else {
+                        // Resolve relative files using standard Web URL api
                         absoluteAssetUrl = new URL(asset.href, item.sourceUrl).href;
                     }
 
-                    // Strict GeoTIFF checker (Guard against catalog MIME type errors on JSON files)
-                    const isGeoTiff = !lowerHref.includes('.json') && !lowerKey.includes('json') && (
-                                      type.includes('geotiff') || 
-                                      type.includes('image/tiff') || 
-                                      lowerHref.includes('.tif') || 
-                                      lowerHref.includes('.tiff') || 
-                                      lowerKey === 'geotiff'
-                                      );
-
-                    // Fetch custom descriptor and icon for GIS analysts
-                    const info = getAssetFriendlyInfo(key, asset, isGeoTiff);
-
-                    // Infer file extension natively from the absolute S3 path
+                    // Extract actual filepath safely to avoid STAC typo anomalies
                     let extension = ".bin";
+                    let pathname = "";
                     try {
                         const urlObj = new URL(absoluteAssetUrl);
-                        const pathname = urlObj.pathname;
+                        pathname = urlObj.pathname.toLowerCase();
                         const match = pathname.match(/\.[a-zA-Z0-9]+$/);
                         if (match) {
                             extension = match[0];
                         }
-                    } catch (e) {}
+                    } catch (e) {
+                        pathname = absoluteAssetUrl.toLowerCase();
+                    }
+
+                    // STRICT GeoTIFF Checker (Ignores misleading catalog MIME types and prevents JSON parsing crashes)
+                    const isGeoTiff = (pathname.endsWith('.tif') || pathname.endsWith('.tiff')) && !pathname.endsWith('.json');
+
+                    // Fetch custom descriptor and icon for GIS analysts
+                    const info = getAssetFriendlyInfo(key, asset, isGeoTiff);
 
                     const assetRow = document.createElement('div');
                     assetRow.className = "flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-slate-950 hover:bg-slate-900 rounded-lg text-xs font-semibold text-slate-300 transition-all border border-slate-800 hover:border-indigo-500/30 gap-2";
