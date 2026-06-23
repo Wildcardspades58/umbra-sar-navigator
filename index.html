@@ -495,20 +495,21 @@
         // General URL Translator (converts s3:// paths and website endpoints to direct virtual-hosted AWS endpoints)
         function translateS3Url(rawHref, sourceUrl) {
             if (!rawHref) return "";
-            let finalUrl = rawHref;
+            
+            // Critical Fix: Replace literal spaces with URL-encoded spaces early 
+            // Web Worker `fetch()` completely crashes if passed literal spaces in a string.
+            let finalUrl = rawHref.replace(/ /g, '%20');
 
             // Handle s3:// protocol
-            if (rawHref.startsWith('s3://')) {
-                const parts = rawHref.replace('s3://', '').split('/');
+            if (finalUrl.startsWith('s3://')) {
+                const parts = finalUrl.replace('s3://', '').split('/');
                 const bucket = parts.shift();
                 const s3Path = parts.join('/');
                 finalUrl = `https://${bucket}.s3.us-west-2.amazonaws.com/${s3Path}`;
             } else {
                 try {
-                    finalUrl = new URL(rawHref, sourceUrl).href;
-                } catch(e) {
-                    finalUrl = rawHref;
-                }
+                    finalUrl = new URL(finalUrl, sourceUrl).href;
+                } catch(e) {}
             }
 
             // 1. Force HTTPS to prevent Mixed Content blocks on GitHub Pages
@@ -1168,13 +1169,13 @@
             }
         }
 
-        // Dynamic Client-Side GeoTIFF/COG Streaming Engine
+        // Dynamic Client-Side GeoTIFF/COG Streaming Engine using Main Thread ArrayBuffer
         async function streamGeoTiffToMap(url, btnElement) {
-            document.getElementById('status-text').innerText = "Connecting to Cloud Optimized GeoTIFF...";
+            document.getElementById('status-text').innerText = "Downloading GeoTIFF (May take a moment)...";
             
             // Show loading spinner on button
             const originalContent = btnElement.innerHTML;
-            btnElement.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-white"></i> Streaming Raster...`;
+            btnElement.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-white"></i> Fetching Raster...`;
             lucide.createIcons();
             btnElement.disabled = true;
 
@@ -1182,10 +1183,83 @@
                 // Clear any existing georaster layer first
                 removeActiveGeoRaster();
 
-                // PASS THE URL DIRECTLY! 
-                // Georaster will automatically use HTTP Range Requests to fetch only the necessary bytes.
-                // This prevents browser memory crashes from downloading massive SAR rasters into ArrayBuffers.
-                const georaster = await parseGeoraster(url);
+                // By fetching the array buffer on the main thread rather than passing the URL directly 
+                // to parseGeoraster, we completely bypass Web Worker CORS bugs and URL encoding crashes.
+                const response = await fetch(url);
+                
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        throw new Error(`404 Not Found: The STAC catalog references this asset, but the physical file does not actually exist on the AWS S3 bucket. (Target: ${url})`);
+                    } else if (response.status === 403) {
+                        throw new Error(`403 Forbidden: AWS blocked access to this file. (Target: ${url})`);
+                    }
+                    throw new Error(`HTTP error! status: ${response.status} on ${url}`);
+                }
+                
+                const arrayBuffer = await response.arrayBuffer();
+
+                // CRITICAL SAFETY CHECK: Inspect magic bytes 
+                if (arrayBuffer.byteLength < 4) {
+                    throw new Error("S3 returned an empty file payload.");
+                }
+                
+                const firstBytes = new Uint8Array(arrayBuffer.slice(0, 4));
+                const hexBytes = Array.from(firstBytes).map(b => '0x' + b.toString(16).toUpperCase().padStart(2, '0')).join(', ');
+                const asciiBytes = Array.from(firstBytes).map(b => (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.').join('');
+
+                // Distinguish between JSON, HTML Webpages, and XML Errors based on the first bytes
+                if (firstBytes[0] === 0x7B) { // '{'
+                    throw new Error(`Fetched asset is a JSON text file, not a GeoTIFF!\n\nTarget URL: ${url}\nReceived ASCII: "${asciiBytes}"\n\nThis means the metadata link for this asset points to a JSON manifest document instead of an image raster.`);
+                }
+                if (firstBytes[0] === 0x3C) { // '<'
+                    if (firstBytes[1] === 0x21) { // '<!' e.g. <!DOCTYPE html>
+                        throw new Error(`The server returned an HTML webpage instead of a GeoTIFF image.\n\nTarget URL: ${url}\nReceived ASCII: "${asciiBytes}"\n\nThis means the catalog link points to a web viewer (like an S3 directory page).`);
+                    } else { // '<?' e.g. <?xml
+                        throw new Error(`AWS S3 rejected the request and returned an XML error document.\n\nTarget URL: ${url}\nReceived ASCII: "${asciiBytes}"\n\nThis usually means 403 Access Denied or 404 Not Found on the bucket.`);
+                    }
+                }
+
+                // Robust check: supports Standard TIFF (42) and BigTIFF (43) for both Little and Big Endian formats
+                const isLittleEndian = firstBytes[0] === 0x49 && firstBytes[1] === 0x49;
+                const isBigEndian = firstBytes[0] === 0x4D && firstBytes[1] === 0x4D;
+                
+                let isTiffMagic = false;
+                let tiffType = "";
+                
+                if (isLittleEndian) {
+                    const version = firstBytes[2] | (firstBytes[3] << 8);
+                    if (version === 42) {
+                        isTiffMagic = true;
+                        tiffType = "Standard TIFF (Little Endian)";
+                    } else if (version === 43) {
+                        isTiffMagic = true;
+                        tiffType = "BigTIFF (Little Endian)";
+                    }
+                } else if (isBigEndian) {
+                    const version = (firstBytes[2] << 8) | firstBytes[3];
+                    if (version === 42) {
+                        isTiffMagic = true;
+                        tiffType = "Standard TIFF (Big Endian)";
+                    } else if (version === 43) {
+                        isTiffMagic = true;
+                        tiffType = "BigTIFF (Big Endian)";
+                    }
+                }
+
+                if (!isTiffMagic) {
+                    let errorDetail = `Fetched asset is not a valid GeoTIFF file.\nReceived ASCII: "${asciiBytes}"\n\n`;
+                    if (firstBytes[0] === 0x4E && firstBytes[1] === 0x49 && firstBytes[2] === 0x54 && firstBytes[3] === 0x46) {
+                        errorDetail += "The selected asset is a raw military NITF container (SICD/SIDD). In-browser Canvas engine only supports streaming Standard GeoTIFF formats. Please use QGIS to load raw NITFs directly.";
+                    } else {
+                        errorDetail += "Expected standard TIFF markers (II* / MM*) or BigTIFF markers (II+ / MM+). Ensure this is an orthorectified GeoTIFF image product.";
+                    }
+                    throw new Error(errorDetail);
+                }
+
+                document.getElementById('status-text').innerText = "Parsing spatial metadata...";
+                
+                // Parse spatial reference systems and metadata using GeoRaster
+                const georaster = await parseGeoraster(arrayBuffer);
 
                 document.getElementById('status-text').innerText = "Projecting and normalising SAR pixels...";
 
@@ -1216,7 +1290,7 @@
 
                 // UI indicators
                 document.getElementById('raster-layer-status').classList.remove('hidden');
-                document.getElementById('status-text').innerText = `GeoTIFF stream active`;
+                document.getElementById('status-text').innerText = `${tiffType} stream active`;
                 
                 btnElement.innerHTML = `<i data-lucide="check-circle" class="w-4 h-4 text-emerald-300"></i> Stream Live`;
                 lucide.createIcons();
