@@ -1,0 +1,1823 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Umbra SAR STAC Catalog Navigator</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- Chart.js for SAR analysis charts -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <!-- Proj4js for client-side coordinate reprojection (UTM to Web Mercator) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.15.0/proj4.js"></script>
+    <!-- GeoRaster Parsing & Rendering Libraries -->
+    <script src="https://unpkg.com/georaster"></script>
+    <script src="https://unpkg.com/georaster-layer-for-leaflet/dist/georaster-layer-for-leaflet.min.js"></script>
+    
+    <style>
+        /* Custom scrollbar styling for a premium dark look */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #1e293b;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #475569;
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #64748b;
+        }
+        .leaflet-container {
+            background: #0f172a;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 h-full flex flex-col font-sans overflow-hidden">
+
+    <!-- Browser Sandbox/CORS Warning Banner (Conditionally Rendered) -->
+    <div id="local-protocol-warning" class="hidden bg-amber-950/85 border-b border-amber-800/50 px-6 py-2.5 flex items-center justify-between text-xs text-amber-200 z-50 transition-all shrink-0">
+        <div class="flex items-center gap-2 max-w-[85%]">
+            <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-400 shrink-0"></i>
+            <span>
+                <strong>Running via local file path (CORS Sandbox Alert):</strong> 
+                Web browsers strictly block local files from streaming binary data (GeoTIFFs) from external AWS S3 servers. 
+                The <strong>Project Quicklook PNG</strong> overlay will work, but to stream raw <strong>GeoTIFFs</strong>, 
+                run this file using a simple local web server (e.g. <code class="bg-slate-950/80 px-1 py-0.5 rounded font-mono text-amber-300">python3 -m http.server</code>).
+            </span>
+        </div>
+        <button onclick="document.getElementById('local-protocol-warning').classList.add('hidden')" class="hover:text-white p-1 text-amber-400">
+            <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+    </div>
+
+    <!-- Top Navigation Header -->
+    <header class="bg-slate-900 border-b border-slate-800 px-6 py-4 flex flex-col md:flex-row justify-between items-center gap-4 shrink-0 z-10 shadow-lg">
+        <div class="flex items-center gap-3">
+            <div class="p-2 bg-indigo-600/20 text-indigo-400 rounded-lg border border-indigo-500/30">
+                <i data-lucide="satellite" class="w-6 h-6 animate-pulse"></i>
+            </div>
+            <div>
+                <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
+                    Umbra SAR STAC Navigator 
+                    <span class="text-xs bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded font-normal">Analyst Tool</span>
+                </h1>
+                <p class="text-xs text-slate-400">Interactive OpenStreetMap client for Umbra Space SpatioTemporal Asset Catalogs</p>
+            </div>
+        </div>
+
+        <!-- Connection / Loader Bar -->
+        <div class="flex flex-col sm:flex-row items-center gap-2 w-full md:w-auto max-w-xl shrink font-medium">
+            <div class="relative flex-1 w-full sm:w-80">
+                <span class="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-400">
+                    <i data-lucide="link" class="w-4 h-4"></i>
+                </span>
+                <input type="text" id="catalog-url-input" 
+                       value="https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/stac/catalog.json"
+                       class="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-4 py-1.5 text-xs text-slate-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                       placeholder="STAC Catalog URL">
+            </div>
+            <button id="load-catalog-btn" class="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center justify-center gap-2 transition-all">
+                <i data-lucide="refresh-cw" class="w-4 h-4"></i> Load Catalog
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Workspace Container -->
+    <main class="flex-1 flex flex-col lg:flex-row overflow-hidden relative">
+
+        <!-- Sidebar / Controls Grid -->
+        <aside id="sidebar" class="w-full lg:w-[480px] bg-slate-900 border-b lg:border-b-0 lg:border-r border-slate-800 flex flex-col h-1/2 lg:h-full transition-all duration-300 z-10 shrink-0">
+            <!-- Sidebar Navigation Tabs -->
+            <div class="flex border-b border-slate-800 bg-slate-900/50 text-sm font-medium shrink-0">
+                <button id="tab-browse-btn" class="flex-1 py-3 px-4 border-b-2 border-indigo-500 text-indigo-400 flex items-center justify-center gap-2 hover:bg-slate-800/30 transition-all">
+                    <i data-lucide="folder-tree" class="w-4 h-4"></i> Explorer
+                </button>
+                <button id="tab-filter-btn" class="flex-1 py-3 px-4 border-b-2 border-transparent text-slate-400 hover:text-slate-300 flex items-center justify-center gap-2 hover:bg-slate-800/30 transition-all">
+                    <i data-lucide="sliders-horizontal" class="w-4 h-4"></i> Query & Analytics
+                </button>
+                <button id="tab-details-btn" class="flex-1 py-3 px-4 border-b-2 border-transparent text-slate-400 hover:text-slate-300 flex items-center justify-center gap-2 hover:bg-slate-800/30 transition-all">
+                    <i data-lucide="info" class="w-4 h-4"></i> Collect Details
+                </button>
+            </div>
+
+            <!-- Tab Contents Wrapper -->
+            <div class="flex-1 overflow-y-auto p-4 space-y-4">
+
+                <!-- TAB 1: STAC EXPLORER & TREE -->
+                <div id="tab-browse" class="space-y-4">
+                    <!-- Dynamic Breadcrumbs -->
+                    <div id="breadcrumbs" class="text-xs text-indigo-400 bg-indigo-950/20 border border-indigo-900/30 rounded-lg p-2.5 flex items-center flex-wrap gap-1">
+                        <span class="text-slate-400">Loading catalog...</span>
+                    </div>
+
+                    <!-- Crawler Status & Actions -->
+                    <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-3">
+                        <div class="flex justify-between items-center">
+                            <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Deep-Scan Static Catalog</h3>
+                            <span id="crawl-stats" class="text-[10px] text-slate-500 bg-slate-900 px-1.5 py-0.5 rounded border border-slate-800">Idle</span>
+                        </div>
+                        <p class="text-xs text-slate-400">
+                            The Umbra STAC catalog contains records indexed in hierarchical folders. Run the deep crawler to discover all geographic targets.
+                        </p>
+                        
+                        <div class="grid grid-cols-2 gap-2 text-xs">
+                            <div>
+                                <label class="block text-slate-500 mb-1 text-[10px] font-semibold">Max Items to Load</label>
+                                <input type="number" id="crawl-limit-input" value="150" min="10" max="2000" 
+                                       class="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-slate-300 focus:outline-none focus:border-indigo-500">
+                            </div>
+                            <div>
+                                <label class="block text-slate-500 mb-1 text-[10px] font-semibold">Parallel Requests</label>
+                                <input type="number" id="crawl-concurrency-input" value="6" min="1" max="20"
+                                       class="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-slate-300 focus:outline-none focus:border-indigo-500">
+                            </div>
+                        </div>
+
+                        <!-- Progress Bar (hidden unless active) -->
+                        <div id="crawl-progress-container" class="space-y-1.5 hidden">
+                            <div class="flex justify-between text-[11px]">
+                                <span id="crawl-progress-text" class="text-indigo-400 font-medium">Scanning folders...</span>
+                                <span id="crawl-progress-pct" class="text-slate-400">0%</span>
+                            </div>
+                            <div class="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden">
+                                <div id="crawl-progress-bar" class="bg-indigo-500 h-1.5 w-0 rounded-full transition-all duration-300"></div>
+                            </div>
+                            <p id="crawl-active-url" class="text-[9px] text-slate-500 truncate font-mono"></p>
+                        </div>
+
+                        <div class="flex gap-2 pt-1">
+                            <button id="start-crawl-btn" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs py-2 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-all">
+                                <i data-lucide="play" class="w-3.5 h-3.5"></i> Run Scanner
+                            </button>
+                            <button id="stop-crawl-btn" disabled class="bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-400 font-semibold text-xs py-2 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-all">
+                                <i data-lucide="square" class="w-3.5 h-3.5"></i> Stop
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Explorer Navigation Tree -->
+                    <div class="space-y-2">
+                        <div class="flex justify-between items-center px-1">
+                            <span class="text-xs font-semibold text-slate-400">Folder Navigation</span>
+                            <span id="folder-count" class="text-[10px] text-indigo-400"></span>
+                        </div>
+                        <div id="stac-tree-list" class="bg-slate-950 border border-slate-800 rounded-xl divide-y divide-slate-900 max-h-60 overflow-y-auto">
+                            <!-- Populated dynamically -->
+                            <p class="text-xs text-slate-500 p-4 text-center">Loading STAC index...</p>
+                        </div>
+                    </div>
+
+                    <!-- Discovered Collects List -->
+                    <div class="space-y-2 flex-1">
+                        <div class="flex justify-between items-center px-1">
+                            <span class="text-xs font-semibold text-slate-400">Loaded footprint items</span>
+                            <span id="loaded-items-count" class="text-xs bg-slate-800 text-indigo-400 px-2 py-0.5 rounded-full font-mono">0</span>
+                        </div>
+                        <div id="collects-list" class="bg-slate-950 border border-slate-800 rounded-xl divide-y divide-slate-900 max-h-72 overflow-y-auto">
+                            <!-- Populated dynamically -->
+                            <p class="text-xs text-slate-500 p-4 text-center">No footprints loaded yet. Scan or explore to load items.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TAB 2: QUERY, FILTERS & ANALYTICS -->
+                <div id="tab-filter" class="hidden space-y-4">
+                    <!-- Advanced Filters Panel -->
+                    <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-4">
+                        <h3 class="text-xs font-bold uppercase tracking-wider text-indigo-400">Interactive Filter Panel</h3>
+                        
+                        <!-- Search Filter -->
+                        <div>
+                            <label class="block text-xs text-slate-400 mb-1">Search Identifier / Location</label>
+                            <input type="text" id="filter-search" placeholder="Type to filter..." 
+                                   class="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500">
+                        </div>
+
+                        <!-- Incidence Angle range -->
+                        <div>
+                            <div class="flex justify-between text-xs text-slate-400 mb-1">
+                                <span>Incidence Angle Limit</span>
+                                <span id="incidence-val-label" class="text-indigo-400 font-mono">Any</span>
+                            </div>
+                            <input type="range" id="filter-incidence" min="0" max="90" value="0" step="1"
+                                   class="w-full accent-indigo-500 bg-slate-900 h-1 rounded cursor-pointer">
+                            <div class="flex justify-between text-[10px] text-slate-500 mt-0.5">
+                                <span>0° (Vertical)</span>
+                                <span>90° (Horizontal)</span>
+                            </div>
+                        </div>
+
+                        <!-- Polarization filter -->
+                        <div>
+                            <label class="block text-xs text-slate-400 mb-1.5">Polarization Channel</label>
+                            <div class="flex gap-4">
+                                <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                                    <input type="checkbox" checked value="HH" class="polarization-filter accent-indigo-600 rounded">
+                                    <span>HH (Horizontal)</span>
+                                </label>
+                                <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                                    <input type="checkbox" checked value="VV" class="polarization-filter accent-indigo-600 rounded">
+                                    <span>VV (Vertical)</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- Platform filter -->
+                        <div>
+                            <label class="block text-xs text-slate-400 mb-1">Satellite Platform</label>
+                            <select id="filter-platform" class="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500">
+                                <option value="ALL">All Platforms</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Statistics Dashboard (Charts) -->
+                    <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-4">
+                        <div class="flex justify-between items-center">
+                            <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">SAR Statistical Charts</h3>
+                            <button id="render-charts-btn" class="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1">
+                                <i data-lucide="refresh-cw" class="w-3 h-3"></i> Refresh Stats
+                            </button>
+                        </div>
+
+                        <!-- Incidence Angle Histogram Chart -->
+                        <div class="space-y-1">
+                            <span class="text-[11px] text-slate-400">Incidence Angle Distribution</span>
+                            <div class="relative h-40 w-full bg-slate-900/50 rounded-lg p-2 border border-slate-800/50">
+                                <canvas id="incidenceChart"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- Polarization Pie Chart -->
+                        <div class="grid grid-cols-2 gap-3">
+                            <div class="space-y-1">
+                                <span class="text-[11px] text-slate-400">Polarizations</span>
+                                <div class="relative h-28 bg-slate-900/50 rounded-lg p-2 border border-slate-800/50 flex items-center justify-center">
+                                    <canvas id="polarizationChart"></canvas>
+                                </div>
+                            </div>
+                            <div class="space-y-1">
+                                <span class="text-[11px] text-slate-400">Platforms</span>
+                                <div class="relative h-28 bg-slate-900/50 rounded-lg p-2 border border-slate-800/50 flex items-center justify-center">
+                                    <canvas id="platformChart"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TAB 3: COLLECT DETAILS -->
+                <div id="tab-details" class="hidden space-y-4">
+                    <div id="no-item-selected" class="text-center py-12 text-slate-500">
+                        <i data-lucide="info" class="w-10 h-10 mx-auto text-slate-600 mb-3"></i>
+                        <p class="text-sm">Click on a footprint from the map or list to view analytical SAR parameters.</p>
+                    </div>
+
+                    <div id="item-details-panel" class="hidden space-y-4">
+                        <!-- Quicklook Section -->
+                        <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-3">
+                            <div class="flex items-center justify-between">
+                                <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">SAR Quicklook Preview</h3>
+                                <span id="raster-layer-status" class="text-[10px] px-2 py-0.5 bg-indigo-950 text-indigo-400 border border-indigo-900/30 rounded hidden animate-pulse">Raster Active</span>
+                            </div>
+                            
+                            <div class="relative group rounded-lg overflow-hidden border border-slate-800 bg-slate-900 max-h-64 flex items-center justify-center">
+                                <img id="detail-thumbnail" src="" class="max-h-60 object-contain w-full transition-transform duration-300 group-hover:scale-105" alt="SAR Thumbnail">
+                                <div class="absolute inset-0 bg-gradient-to-t from-slate-950 via-transparent to-transparent opacity-40"></div>
+                            </div>
+
+                            <!-- Map Overlay Projections Controls -->
+                            <div class="bg-slate-900 rounded-lg p-3 border border-slate-800 space-y-2.5">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-xs font-semibold text-slate-300 flex items-center gap-1.5 flex-wrap">
+                                        <i data-lucide="layers" class="w-3.5 h-3.5 text-indigo-400"></i> Project Quicklook PNG
+                                    </span>
+                                    <label class="relative inline-flex items-center cursor-pointer">
+                                        <input type="checkbox" id="overlay-map-toggle" class="sr-only peer">
+                                        <div class="w-9 h-5 bg-slate-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-slate-300 after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+                                    </label>
+                                </div>
+                                <div class="space-y-1">
+                                    <div class="flex justify-between text-[11px] text-slate-400">
+                                        <span>Overlay Layer Opacity</span>
+                                        <span id="opacity-label" class="font-mono text-indigo-400">70%</span>
+                                    </div>
+                                    <input type="range" id="overlay-opacity" min="10" max="100" value="70"
+                                           class="w-full accent-indigo-500 bg-slate-850 h-1 rounded cursor-pointer">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- SAR Geometries / Collector Parameters -->
+                        <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-3">
+                            <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Radar & View Geometry</h3>
+                            <div class="grid grid-cols-2 gap-2 text-xs">
+                                <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                                    <span class="text-slate-500 text-[10px] block font-semibold">Incidence Angle</span>
+                                    <span id="det-incidence" class="font-bold text-indigo-300 font-mono">-</span>
+                                </div>
+                                <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                                    <span class="text-slate-500 text-[10px] block font-semibold">Grazing Angle</span>
+                                    <span id="det-grazing" class="font-bold text-indigo-300 font-mono">-</span>
+                                </div>
+                                <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                                    <span class="text-slate-500 text-[10px] block font-semibold">Polarization</span>
+                                    <span id="det-polarization" class="font-bold text-indigo-300 font-mono">-</span>
+                                </div>
+                                <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                                    <span class="text-slate-500 text-[10px] block font-semibold">Resolution (R/A)</span>
+                                    <span id="det-resolution" class="font-bold text-indigo-300 font-mono">-</span>
+                                </div>
+                                <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                                    <span class="text-slate-500 text-[10px] block font-semibold">Slant Range</span>
+                                    <span id="det-slant-range" class="font-bold text-indigo-300 font-mono">-</span>
+                                </div>
+                                <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                                    <span class="text-slate-500 text-[10px] block font-semibold">Squint Angle</span>
+                                    <span id="det-squint" class="font-bold text-indigo-300 font-mono">-</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Collection Attributes -->
+                        <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-2">
+                            <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Sensing Properties</h3>
+                            <div class="space-y-1.5 text-xs text-slate-300">
+                                <div class="flex justify-between py-1 border-b border-slate-900">
+                                    <span class="text-slate-500">Collect Date</span>
+                                    <span id="det-date" class="font-medium">-</span>
+                                </div>
+                                <div class="flex justify-between py-1 border-b border-slate-900">
+                                    <span class="text-slate-500">Platform</span>
+                                    <span id="det-platform" class="font-medium">-</span>
+                                </div>
+                                <div class="flex justify-between py-1 border-b border-slate-900">
+                                    <span class="text-slate-500">Product Class</span>
+                                    <span id="det-product" class="font-medium">-</span>
+                                </div>
+                                <div class="flex justify-between py-1 border-b border-slate-900">
+                                    <span class="text-slate-500">Target Azimuth</span>
+                                    <span id="det-azimuth" class="font-medium">-</span>
+                                </div>
+                                <div class="flex justify-between py-1 border-b border-slate-900">
+                                    <span class="text-slate-500">Collect ID</span>
+                                    <span id="det-id" class="font-mono text-[10px] text-slate-400 select-all truncate max-w-[200px]">-</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Data Assets Download Links -->
+                        <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-2.5">
+                            <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 font-semibold text-slate-300">Available SAR Deliverables</h3>
+                            <div id="detail-assets-list" class="space-y-2">
+                                <!-- Assets buttons are appended here -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Bottom utility status/exports -->
+            <div class="p-4 border-t border-slate-800 bg-slate-900/60 flex items-center justify-between text-xs shrink-0 font-medium">
+                <div class="flex items-center gap-2 text-slate-400">
+                    <span id="active-marker" class="w-2.5 h-2.5 rounded-full bg-indigo-500 animate-pulse"></span>
+                    <span id="status-text">Ready to Traverse STAC</span>
+                </div>
+                <div class="flex gap-2">
+                    <button id="export-geojson-btn" title="Export as GeoJSON" class="bg-slate-800 hover:bg-slate-700 text-slate-300 p-1.5 rounded border border-slate-700 transition-all">
+                        <i data-lucide="download" class="w-4 h-4"></i>
+                    </button>
+                    <button id="export-csv-btn" title="Export as CSV" class="bg-slate-800 hover:bg-slate-700 text-slate-300 p-1.5 rounded border border-slate-700 transition-all">
+                        <i data-lucide="file-spreadsheet" class="w-4 h-4"></i>
+                    </button>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Leaflet Map Container -->
+        <section id="map-container" class="flex-1 h-1/2 lg:h-full relative flex flex-col">
+            <div id="map" class="w-full h-full"></div>
+
+            <!-- Float Info Overlay -->
+            <div class="absolute bottom-4 left-4 z-[1000] bg-slate-950/90 backdrop-blur border border-slate-800 px-3 py-1.5 rounded-lg text-slate-300 text-xs font-mono shadow-xl flex items-center gap-2">
+                <span class="text-indigo-400"><i data-lucide="compass" class="w-3.5 h-3.5 inline"></i> Cursor:</span>
+                <span id="coord-tracker">0.00000°, 0.00000°</span>
+            </div>
+
+            <!-- Floating Map Actions -->
+            <div class="absolute top-4 right-4 z-[1000] flex flex-col gap-2">
+                <button id="btn-fit-bounds" title="Fit Map to Loaded Footprints" class="bg-slate-950/90 hover:bg-slate-900 border border-slate-800 text-slate-300 p-2.5 rounded-lg shadow-xl hover:text-white transition-all">
+                    <i data-lucide="maximize" class="w-4 h-4"></i>
+                </button>
+                <button id="btn-clear-layers" title="Clear Map Footprints" class="bg-slate-950/90 hover:bg-red-950/90 border border-slate-800 hover:border-red-500/50 text-slate-400 hover:text-red-300 p-2.5 rounded-lg shadow-xl transition-all">
+                    <i data-lucide="trash-2" class="w-4 h-4"></i>
+                </button>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Map/Basemap Controller Switcher (In-map Floating Overlay) -->
+    <div id="map-control-box" class="hidden"></div>
+
+    <!-- Alert / Message Modal System -->
+    <div id="modal-container" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[2000] hidden flex items-center justify-center p-4">
+        <div class="bg-slate-900 border border-slate-800 max-w-md w-full rounded-xl p-5 space-y-4 shadow-2xl">
+            <div class="flex items-center gap-3 text-amber-500">
+                <i data-lucide="alert-triangle" class="w-6 h-6"></i>
+                <h3 id="modal-title" class="text-md font-bold text-white">Alert</h3>
+            </div>
+            <p id="modal-message" class="text-xs text-slate-300 leading-relaxed whitespace-pre-line"></p>
+            <div class="flex justify-end pt-2">
+                <button id="modal-close-btn" class="bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white text-xs font-semibold px-4 py-2 rounded-lg transition-all">
+                    Acknowledge
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main JS Application Logic -->
+    <script>
+        // STAC Browser State Variables
+        let activeCatalogUrl = "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/stac/catalog.json";
+        let breadcrumbsHistory = [];
+        let loadedItems = [];
+        let filteredItems = [];
+        let map;
+        let footprintGroup;
+        let quicklookOverlayLayer = null;
+        let activeGeoRasterLayer = null; // Track on-demand streamed GeoTIFF layer
+        let selectedItem = null;
+
+        // Leaflet Basemaps configuration
+        let osmLayer, satelliteLayer, darkLayer;
+
+        // Crawling State Variables
+        let crawlQueue = [];
+        let activeRequests = 0;
+        let cancelCrawlFlag = false;
+        let crawledUrls = new Set();
+        let totalRequestsCompleted = 0;
+        let maximumItemsLimit = 150;
+        let concurrencyLimit = 6;
+
+        // ChartJS Handles
+        let incidenceChartInstance = null;
+        let polarizationChartInstance = null;
+        let platformChartInstance = null;
+
+        window.onload = function() {
+            // Detect if running locally on file:// protocol
+            if (window.location.protocol === 'file:') {
+                document.getElementById('local-protocol-warning').classList.remove('hidden');
+            }
+
+            // Initialize Icons
+            lucide.createIcons();
+
+            // Setup Custom Modal Handlers
+            document.getElementById('modal-close-btn').addEventListener('click', () => {
+                document.getElementById('modal-container').classList.add('hidden');
+            });
+
+            // Init Leaflet Map with CartoDB Dark basemap default for deep space aesthetic
+            map = L.map('map', {
+                center: [20, 0],
+                zoom: 2,
+                zoomControl: false
+            });
+            L.control.zoom({ position: 'topleft' }).addTo(map);
+
+            // Layer setups
+            osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '&copy; OpenStreetMap contributors'
+            });
+            satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+            });
+            darkLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+                subdomains: 'abcd',
+                maxZoom: 20
+            });
+
+            // Set initial basemap
+            darkLayer.addTo(map);
+
+            // Setup layer controls
+            const baseMaps = {
+                "OpenStreetMap Vector": osmLayer,
+                "Esri Imagery Satellite": satelliteLayer,
+                "CartoDB Dark Matter": darkLayer
+            };
+            L.control.layers(baseMaps, null, { position: 'topright' }).addTo(map);
+
+            // Setup footprint feature group
+            footprintGroup = L.featureGroup().addTo(map);
+
+            // Coordinate Tracker
+            map.on('mousemove', function(e) {
+                document.getElementById('coord-tracker').innerText = `${e.latlng.lat.toFixed(5)}°, ${e.latlng.lng.toFixed(5)}°`;
+            });
+
+            // Setup Action Button Event Listeners
+            document.getElementById('load-catalog-btn').addEventListener('click', loadFromInput);
+            document.getElementById('start-crawl-btn').addEventListener('click', runCrawlProcess);
+            document.getElementById('stop-crawl-btn').addEventListener('click', cancelCrawl);
+            document.getElementById('btn-fit-bounds').addEventListener('click', fitMapToFootprints);
+            document.getElementById('btn-clear-layers').addEventListener('click', clearAllLoadedData);
+            document.getElementById('export-geojson-btn').addEventListener('click', exportGeoJSON);
+            document.getElementById('export-csv-btn').addEventListener('click', exportCSV);
+            document.getElementById('render-charts-btn').addEventListener('click', updateAnalyticsCharts);
+
+            // Filter listeners
+            document.getElementById('filter-search').addEventListener('input', applyFilters);
+            document.getElementById('filter-incidence').addEventListener('input', function() {
+                const val = parseInt(this.value);
+                document.getElementById('incidence-val-label').innerText = val === 0 ? "Any" : `>= ${val}°`;
+                applyFilters();
+            });
+            document.querySelectorAll('.polarization-filter').forEach(el => {
+                el.addEventListener('change', applyFilters);
+            });
+            document.getElementById('filter-platform').addEventListener('change', applyFilters);
+
+            // Image projection togglers
+            document.getElementById('overlay-map-toggle').addEventListener('change', toggleMapOverlay);
+            document.getElementById('overlay-opacity').addEventListener('input', function() {
+                document.getElementById('opacity-label').innerText = `${this.value}%`;
+                if (quicklookOverlayLayer) {
+                    quicklookOverlayLayer.setOpacity(this.value / 100);
+                }
+                if (activeGeoRasterLayer) {
+                    activeGeoRasterLayer.setOpacity(this.value / 100);
+                }
+            });
+
+            // Sidebar Tabs System
+            setupSidebarTabs();
+
+            // Load initial catalog
+            loadStacNode(activeCatalogUrl);
+        };
+
+        // Custom Safe Toast/Modal Notification replacement for standard alerts
+        function notify(title, message) {
+            document.getElementById('modal-title').innerText = title;
+            document.getElementById('modal-message').innerText = message;
+            document.getElementById('modal-container').classList.remove('hidden');
+        }
+
+        // Sidebar Tabs Navigation Setup
+        function setupSidebarTabs() {
+            const tabs = [
+                { id: 'tab-browse', btn: 'tab-browse-btn' },
+                { id: 'tab-filter', btn: 'tab-filter-btn' },
+                { id: 'tab-details', btn: 'tab-details-btn' }
+            ];
+
+            tabs.forEach(tab => {
+                document.getElementById(tab.btn).addEventListener('click', () => {
+                    tabs.forEach(t => {
+                        document.getElementById(t.id).classList.add('hidden');
+                        document.getElementById(t.btn).classList.remove('border-indigo-500', 'text-indigo-400');
+                        document.getElementById(t.btn).classList.add('border-transparent', 'text-slate-400');
+                    });
+                    document.getElementById(tab.id).classList.remove('hidden');
+                    document.getElementById(tab.btn).classList.add('border-indigo-500', 'text-indigo-400');
+                    document.getElementById(tab.btn).classList.remove('border-transparent', 'text-slate-400');
+                });
+            });
+        }
+
+        // Trigger loading node from top URL bar
+        function loadFromInput() {
+            const inputVal = document.getElementById('catalog-url-input').value.trim();
+            if (inputVal) {
+                activeCatalogUrl = inputVal;
+                breadcrumbsHistory = [];
+                loadStacNode(activeCatalogUrl);
+            }
+        }
+
+        // Fetch STAC Node Data (Dynamic relative link parsing with full backoff integration)
+        async function loadStacNode(url) {
+            document.getElementById('status-text').innerText = "Loading Node...";
+            document.getElementById('stac-tree-list').innerHTML = `
+                <div class="p-6 text-center text-slate-400">
+                    <i data-lucide="loader-2" class="w-6 h-6 animate-spin mx-auto text-indigo-500 mb-2"></i>
+                    <p class="text-xs">Fetching metadata from server...</p>
+                </div>
+            `;
+            lucide.createIcons();
+
+            try {
+                const data = await fetchWithRetryAndExponentialBackoff(url);
+                document.getElementById('status-text').innerText = "STAC Node Loaded";
+                parseStacNodeResponse(url, data);
+            } catch (err) {
+                document.getElementById('status-text').innerText = "Load Failed";
+                document.getElementById('stac-tree-list').innerHTML = `
+                    <div class="p-6 text-center text-red-400">
+                        <i data-lucide="x-circle" class="w-6 h-6 mx-auto mb-2"></i>
+                        <p class="text-xs">Failed to load STAC Node: ${err.message}</p>
+                    </div>
+                `;
+                lucide.createIcons();
+                notify("S3 Connection/CORS Error", `The requested resource at "${url}" could not be accessed. Ensure it allows CORS permissions, or try a valid public STAC endpoint.`);
+            }
+        }
+
+        // Exponential backoff robust fetch tool
+        async function fetchWithRetryAndExponentialBackoff(url, maxRetries = 5) {
+            let delay = 1000;
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const res = await fetch(url);
+                    if (res.ok) return await res.json();
+                    if (res.status === 429 || res.status >= 500) {
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        delay *= 2; // exponential double
+                        continue;
+                    }
+                    throw new Error(`HTTP Standard ${res.status}`);
+                } catch (err) {
+                    if (i === maxRetries - 1) throw err;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    delay *= 2;
+                }
+            }
+            throw new Error("Maximum retry iterations exceeded.");
+        }
+
+        // Parse Catalog, Collection or Item node types
+        function parseStacNodeResponse(url, node) {
+            // Setup breadcrumbs
+            const nodeTitle = node.title || node.id || "STAC Node";
+            
+            // Check if node already exists in path history
+            const existingIdx = breadcrumbsHistory.findIndex(h => h.url === url);
+            if (existingIdx !== -1) {
+                breadcrumbsHistory = breadcrumbsHistory.slice(0, existingIdx + 1);
+            } else {
+                breadcrumbsHistory.push({ url, title: nodeTitle });
+            }
+
+            renderBreadcrumbs();
+
+            // Render children in Tree View
+            const childLinks = node.links ? node.links.filter(l => l.rel === 'child' || l.rel === 'item') : [];
+            const treeContainer = document.getElementById('stac-tree-list');
+            
+            if (childLinks.length === 0) {
+                treeContainer.innerHTML = `<p class="text-xs text-slate-500 p-4 text-center">No catalog children or folders located at this node level.</p>`;
+                return;
+            }
+
+            document.getElementById('folder-count').innerText = `${childLinks.length} folder elements`;
+
+            treeContainer.innerHTML = "";
+            childLinks.forEach(link => {
+                const absoluteLinkUrl = new URL(link.href, url).href;
+                const linkTitle = link.title || link.id || link.href.split('/').slice(-2).join('/') || "Subcatalog Reference";
+                
+                const card = document.createElement('div');
+                card.className = "flex items-center justify-between p-3 hover:bg-slate-900 transition-all cursor-pointer text-xs";
+                
+                const typeIcon = link.rel === 'item' ? 'file' : 'folder';
+                const typeColor = link.rel === 'item' ? 'text-indigo-400' : 'text-amber-500';
+
+                card.innerHTML = `
+                    <div class="flex items-center gap-2.5 truncate max-w-[80%]">
+                        <i data-lucide="${typeIcon}" class="w-4 h-4 ${typeColor} shrink-0"></i>
+                        <span class="text-slate-300 font-medium truncate">${linkTitle}</span>
+                    </div>
+                    <button class="bg-indigo-950 hover:bg-indigo-900 border border-indigo-900/40 text-indigo-300 text-[10px] font-semibold px-2.5 py-1 rounded transition-all shrink-0">
+                        Explore
+                    </button>
+                `;
+
+                card.addEventListener('click', () => {
+                    if (link.rel === 'item') {
+                        // Direct Item view
+                        loadSingleStacItemDirectly(absoluteLinkUrl);
+                    } else {
+                        // Traverse Folder
+                        loadStacNode(absoluteLinkUrl);
+                    }
+                });
+
+                treeContainer.appendChild(card);
+            });
+
+            lucide.createIcons();
+        }
+
+        // Render dynamic breadcrumbs
+        function renderBreadcrumbs() {
+            const breadcrumbEl = document.getElementById('breadcrumbs');
+            breadcrumbEl.innerHTML = "";
+            
+            breadcrumbsHistory.forEach((crumb, idx) => {
+                const isLast = idx === breadcrumbsHistory.length - 1;
+                
+                const linkNode = document.createElement('span');
+                linkNode.className = isLast ? "text-indigo-300 font-bold max-w-[150px] truncate" : "hover:text-white cursor-pointer hover:underline max-w-[120px] truncate";
+                linkNode.innerText = crumb.title;
+                
+                if (!isLast) {
+                    linkNode.addEventListener('click', () => {
+                        loadStacNode(crumb.url);
+                    });
+                }
+                
+                breadcrumbEl.appendChild(linkNode);
+                
+                if (!isLast) {
+                    const arrow = document.createElement('i');
+                    arrow.setAttribute('data-lucide', 'chevron-right');
+                    arrow.className = "w-3 h-3 text-slate-600";
+                    breadcrumbEl.appendChild(arrow);
+                }
+            });
+
+            lucide.createIcons();
+        }
+
+        // Fetch and load a single STAC item directly
+        async function loadSingleStacItemDirectly(url) {
+            document.getElementById('status-text').innerText = "Loading STAC Item...";
+            try {
+                const item = await fetchWithRetryAndExponentialBackoff(url);
+                addDiscoveredStacItem(url, item);
+                // Switch sidebar tab to details automatically
+                document.getElementById('tab-details-btn').click();
+                selectLoadedItem(item.id);
+            } catch (err) {
+                notify("Failed to fetch STAC Item", err.message);
+            }
+        }
+
+        // Active Recursive Crawler logic for full static STAC trees
+        function runCrawlProcess() {
+            maximumItemsLimit = parseInt(document.getElementById('crawl-limit-input').value) || 150;
+            concurrencyLimit = parseInt(document.getElementById('crawl-concurrency-input').value) || 6;
+            
+            cancelCrawlFlag = false;
+            crawlQueue = [breadcrumbsHistory[breadcrumbsHistory.length - 1].url];
+            crawledUrls.clear();
+            crawledUrls.add(crawlQueue[0]);
+
+            totalRequestsCompleted = 0;
+
+            document.getElementById('start-crawl-btn').disabled = true;
+            document.getElementById('stop-crawl-btn').disabled = false;
+            document.getElementById('crawl-progress-container').classList.remove('hidden');
+            document.getElementById('status-text').innerText = "Deep Scanning Static Files...";
+            document.getElementById('crawl-stats').innerText = "Scanning Active";
+
+            // Spawn concurrent crawlers
+            for (let i = 0; i < concurrencyLimit; i++) {
+                spawnWorkerThread();
+            }
+        }
+
+        // Worker thread model for high speed parallel crawl
+        async function spawnWorkerThread() {
+            if (cancelCrawlFlag || crawlQueue.length === 0 || loadedItems.length >= maximumItemsLimit) {
+                checkCrawlFinished();
+                return;
+            }
+
+            const currentTargetUrl = crawlQueue.shift();
+            activeRequests++;
+
+            // Update UI diagnostics
+            document.getElementById('crawl-active-url').innerText = `GET ${currentTargetUrl}`;
+            
+            try {
+                const data = await fetchWithRetryAndExponentialBackoff(currentTargetUrl);
+                totalRequestsCompleted++;
+                
+                if (data.type === 'Feature') {
+                    // STAC Item footprint found!
+                    addDiscoveredStacItem(currentTargetUrl, data);
+                } else if (data.links && Array.isArray(data.links)) {
+                    // It's a Catalog/Collection, extract relative child nodes or items
+                    data.links.forEach(link => {
+                        if (link.rel === 'child' || link.rel === 'item') {
+                            const absoluteLink = new URL(link.href, currentTargetUrl).href;
+                            if (!crawledUrls.has(absoluteLink)) {
+                                crawledUrls.add(absoluteLink);
+                                crawlQueue.push(absoluteLink);
+                            }
+                        }
+                    });
+                }
+            } catch (e) {
+                console.error("Crawl fetch error on path: ", currentTargetUrl, e);
+            } finally {
+                activeRequests--;
+                updateCrawlProgressBar();
+                
+                // Spawn next task in queue
+                setTimeout(spawnWorkerThread, 20);
+            }
+        }
+
+        // Update progress bar calculations
+        function updateCrawlProgressBar() {
+            const loadedCount = loadedItems.length;
+            const pct = Math.min(Math.round((loadedCount / maximumItemsLimit) * 100), 100);
+            
+            document.getElementById('crawl-progress-text').innerText = `Scanned: ${loadedCount} of ${maximumItemsLimit} limit...`;
+            document.getElementById('crawl-progress-pct').innerText = `${pct}%`;
+            document.getElementById('crawl-progress-bar').style.width = `${pct}%`;
+        }
+
+        // Cancel scanner gracefully
+        function cancelCrawl() {
+            cancelCrawlFlag = true;
+            document.getElementById('status-text').innerText = "Cancelling Crawl...";
+            document.getElementById('crawl-stats').innerText = "Crawl Halted";
+        }
+
+        // Check if thread pool is complete
+        function checkCrawlFinished() {
+            if (activeRequests === 0) {
+                document.getElementById('start-crawl-btn').disabled = false;
+                document.getElementById('stop-crawl-btn').disabled = true;
+                document.getElementById('crawl-progress-container').classList.add('hidden');
+                document.getElementById('status-text').innerText = `Scan Complete. ${loadedItems.length} loaded.`;
+                document.getElementById('crawl-stats').innerText = "Idle / Finished";
+                
+                // Fit bounds automatically at the end of discovery
+                if (loadedItems.length > 0) {
+                    fitMapToFootprints();
+                }
+
+                // Populate filters options automatically with found platforms
+                repopulatePlatformOptions();
+                applyFilters();
+                updateAnalyticsCharts();
+            }
+        }
+
+        // Handle addition of newly discovered SAR collect footprint
+        function addDiscoveredStacItem(sourceUrl, item) {
+            // Verify if footprint is valid geojson and not already loaded
+            if (!item.id || loadedItems.some(i => i.id === item.id)) return;
+
+            // Preserve source metadata endpoint URL to resolve relative assets downstream
+            item.sourceUrl = sourceUrl;
+
+            // Save payload metadata in memory
+            loadedItems.push(item);
+
+            // Create Leaflet footprint poly with modern neon border styling
+            const footprintColor = "#6366f1"; // neon purple-indigo
+            
+            if (item.geometry) {
+                const geoJsonLayer = L.geoJSON(item, {
+                    style: {
+                        color: footprintColor,
+                        weight: 2,
+                        opacity: 0.8,
+                        fillColor: footprintColor,
+                        fillOpacity: 0.15
+                    },
+                    onEachFeature: function(feature, layer) {
+                        // Bind mouse behavior
+                        layer.on({
+                            mouseover: function(e) {
+                                layer.setStyle({
+                                    color: "#f43f5e", // rose high accent
+                                    fillOpacity: 0.45,
+                                    weight: 3
+                                });
+                            },
+                            mouseout: function(e) {
+                                // Keep highlighted if selected
+                                const isCurrentSelected = selectedItem && selectedItem.id === item.id;
+                                layer.setStyle({
+                                    color: isCurrentSelected ? "#22c55e" : footprintColor,
+                                    fillOpacity: isCurrentSelected ? 0.3 : 0.15,
+                                    weight: isCurrentSelected ? 3 : 2
+                                });
+                            },
+                            click: function(e) {
+                                selectLoadedItem(item.id);
+                                document.getElementById('tab-details-btn').click();
+                            }
+                        });
+                    }
+                });
+
+                // Attach references
+                item.mapLayer = geoJsonLayer;
+                footprintGroup.addLayer(geoJsonLayer);
+            }
+
+            updateLoadedItemsUIList();
+        }
+
+        // Re-populate platform options in filter automatically
+        function repopulatePlatformOptions() {
+            const platformDropdown = document.getElementById('filter-platform');
+            const uniquePlatforms = [...new Set(loadedItems.map(i => i.properties?.platform).filter(Boolean))];
+            
+            // Clear existing except first "All"
+            platformDropdown.innerHTML = `<option value="ALL">All Platforms</option>`;
+            
+            uniquePlatforms.sort().forEach(platform => {
+                const option = document.createElement('option');
+                option.value = platform;
+                option.innerText = platform;
+                platformDropdown.appendChild(option);
+            });
+        }
+
+        // Refresh UI list element containing available files
+        function updateLoadedItemsUIList() {
+            const countEl = document.getElementById('loaded-items-count');
+            countEl.innerText = loadedItems.length;
+
+            const listContainer = document.getElementById('collects-list');
+            if (loadedItems.length === 0) {
+                listContainer.innerHTML = `<p class="text-xs text-slate-500 p-4 text-center">No footprints loaded yet.</p>`;
+                return;
+            }
+
+            // Render list matching dynamic filtered list
+            const displayItems = filteredItems.length > 0 || document.getElementById('filter-search').value || document.getElementById('filter-incidence').value > 0 ? filteredItems : loadedItems;
+
+            listContainer.innerHTML = "";
+            displayItems.forEach(item => {
+                const platform = item.properties?.platform || "SAR Satellite";
+                const pols = (item.properties?.["sar:polarizations"] || []).join("/");
+                const datetimeStr = item.properties?.datetime ? new Date(item.properties.datetime).toLocaleDateString() : "Unknown Time";
+                const target = item.properties?.["umbra:target_name"] || item.id;
+                
+                const itemRow = document.createElement('div');
+                itemRow.className = `p-3 text-xs hover:bg-slate-900 cursor-pointer transition-all flex items-start justify-between border-b border-slate-950 ${selectedItem && selectedItem.id === item.id ? 'bg-indigo-950/20 border-l-2 border-indigo-500' : ''}`;
+                
+                itemRow.innerHTML = `
+                    <div class="space-y-1 truncate max-w-[80%]">
+                        <p class="font-semibold text-slate-200 truncate text-left">${target}</p>
+                        <div class="flex gap-2 text-[10px] text-slate-500 font-mono">
+                            <span>${platform}</span>
+                            <span>|</span>
+                            <span>${pols}</span>
+                            <span>|</span>
+                            <span>${datetimeStr}</span>
+                        </div>
+                    </div>
+                    <i data-lucide="chevron-right" class="w-4 h-4 text-slate-600 shrink-0 self-center"></i>
+                `;
+
+                itemRow.addEventListener('click', () => {
+                    selectLoadedItem(item.id);
+                    document.getElementById('tab-details-btn').click();
+                });
+
+                listContainer.appendChild(itemRow);
+            });
+
+            lucide.createIcons();
+        }
+
+        // Helper mapper to explain SAR format structures clearly in details list
+        function getAssetFriendlyInfo(key, asset, isGeoTiff) {
+            const lowerKey = key.toLowerCase();
+            const type = (asset.type || "").toLowerCase();
+            
+            let label = asset.title || key;
+            let description = "Direct Data Stream";
+            let icon = "file-down";
+            let badgeColor = "bg-indigo-950 text-indigo-300 border border-indigo-900/30";
+
+            if (lowerKey === 'gjd') {
+                label = "Geocoded Joint Dataset (GJD)";
+                description = "JSON text parameters containing target telemetry";
+                icon = "braces";
+                badgeColor = "bg-amber-950/40 text-amber-400 border border-amber-500/20";
+            } else if (lowerKey === 'sicd') {
+                label = "Sensor Independent Coherent Data (SICD)";
+                description = "Raw complex raster container (NITF format) — Stream/Drag to QGIS";
+                icon = "binary";
+                badgeColor = "bg-emerald-950/40 text-emerald-400 border border-emerald-500/20";
+            } else if (lowerKey === 'sidd') {
+                label = "Sensor Independent Derived Data (SIDD)";
+                description = "Detected amplitude raster container (NITF format) — Stream/Drag to QGIS";
+                icon = "image";
+                badgeColor = "bg-emerald-950/40 text-emerald-400 border border-emerald-500/20";
+            } else if (lowerKey === 'rendered_preview' || lowerKey === 'thumbnail') {
+                label = "Quicklook Preview Image";
+                description = "Processed PNG used for in-map canvas projection overlays";
+                icon = "eye";
+                badgeColor = "bg-blue-950/40 text-blue-400 border border-blue-500/20";
+            } else if (isGeoTiff) {
+                label = "GeoTIFF Image Raster";
+                description = "Standard GIS imagery band — Stream/Drag directly to QGIS";
+                icon = "image";
+                badgeColor = "bg-emerald-950/40 text-emerald-400 border border-emerald-500/20";
+            }
+
+            return { label, description, icon, badgeColor };
+        }
+
+        // Intercept click on NITF or TIFF files to bypass misconfigured S3 download headers
+        async function forceDownloadAsset(url, filename, ext, btnElement) {
+            document.getElementById('status-text').innerText = "Streaming file data...";
+            
+            // Show loading spinner on button
+            const originalContent = btnElement.innerHTML;
+            btnElement.innerHTML = `<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin text-indigo-400"></i>`;
+            lucide.createIcons();
+            btnElement.disabled = true;
+
+            try {
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const blob = await response.blob();
+                
+                // Re-package as raw binary stream to bypass browser's MIME extension forcing
+                const binaryBlob = new Blob([blob], { type: 'application/octet-stream' });
+                const objectUrl = window.URL.createObjectURL(binaryBlob);
+                
+                const downloadAnchor = document.createElement('a');
+                downloadAnchor.href = objectUrl;
+                
+                // Format clean name
+                let cleanName = filename;
+                if (!cleanName.endsWith(ext)) {
+                    cleanName = cleanName + ext;
+                }
+                
+                downloadAnchor.setAttribute("download", cleanName);
+                document.body.appendChild(downloadAnchor);
+                downloadAnchor.click();
+                
+                // Cleanup
+                document.body.removeChild(downloadAnchor);
+                window.URL.revokeObjectURL(objectUrl);
+                
+                document.getElementById('status-text').innerText = "Download triggered successfully!";
+                btnElement.innerHTML = `<i data-lucide="check-circle" class="w-3.5 h-3.5 text-emerald-400"></i>`;
+                lucide.createIcons();
+                
+                setTimeout(() => {
+                    btnElement.innerHTML = originalContent;
+                    lucide.createIcons();
+                    btnElement.disabled = false;
+                }, 2000);
+
+            } catch (err) {
+                console.error("Crawl/Force download failed: ", err);
+                document.getElementById('status-text').innerText = "Direct download blocked. Opening fallback...";
+                
+                // Fallback: Try a standard blank window redirect if CORS is strictly blocking client-side fetch
+                window.open(url, '_blank');
+                
+                btnElement.innerHTML = `<i data-lucide="alert-circle" class="w-3.5 h-3.5 text-amber-500"></i>`;
+                lucide.createIcons();
+                
+                notify("Direct Binary Fetch Blocked", 
+                    "The browser's security rules (CORS) prevented downloading the raw binary directly via JavaScript. " +
+                    "This typically happens if you are running this page locally via a direct file path.\n\n" +
+                    "We have opened the download link in a new tab as a fallback.\n\n" +
+                    "Highly Recommended for QGIS: Click the 'Copy direct S3 URL' button instead, then in QGIS add a Raster Layer using 'Protocol: HTTP/Cloud/S3' with the copied link!"
+                );
+
+                setTimeout(() => {
+                    btnElement.innerHTML = originalContent;
+                    lucide.createIcons();
+                    btnElement.disabled = false;
+                }, 3000);
+            }
+        }
+
+        // Dynamic Client-Side GeoTIFF/COG Streaming Engine
+        async function streamGeoTiffToMap(url, btnElement) {
+            document.getElementById('status-text').innerText = "Streaming GeoTIFF bytes...";
+            
+            // Show loading spinner on button
+            const originalContent = btnElement.innerHTML;
+            btnElement.innerHTML = `<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin text-indigo-400"></i>`;
+            lucide.createIcons();
+            btnElement.disabled = true;
+
+            try {
+                // Clear any existing georaster layer first
+                removeActiveGeoRaster();
+
+                // Fetch arraybuffer bytes directly from AWS S3
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const arrayBuffer = await response.arrayBuffer();
+
+                // CRITICAL SAFETY CHECK: Inspect magic bytes to prevent georaster from throwing "Invalid byte order value"
+                if (arrayBuffer.byteLength < 4) {
+                    throw new Error("S3 returned an empty file payload.");
+                }
+                const firstBytes = new Uint8Array(arrayBuffer.slice(0, 4));
+                
+                // Convert first 4 bytes to Hex and ASCII for informative debug dialogues
+                const hexBytes = Array.from(firstBytes).map(b => '0x' + b.toString(16).toUpperCase().padStart(2, '0')).join(', ');
+                const asciiBytes = Array.from(firstBytes).map(b => (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.').join('');
+
+                // Check if we accidentally fetched a JSON file
+                if (firstBytes[0] === 0x7B) {
+                    throw new Error(`Fetched asset is a JSON text file, not a GeoTIFF!\n\nTarget URL: ${url}\nReceived Hex: [${hexBytes}]\nReceived ASCII: "${asciiBytes}"\n\nThis means the metadata link for this asset points to a JSON manifest document instead of an image raster.`);
+                }
+
+                // Check if we received an XML error page instead of binary data (starts with '<' or '<?xml')
+                if (firstBytes[0] === 0x3C) {
+                    throw new Error(`AWS S3 returned an Access Denied or CORS block.\n\nTarget URL: ${url}\nReceived Hex: [${hexBytes}]\nReceived ASCII: "${asciiBytes}"\n\nYour local browser's CORS sandbox blocked this stream. If you are running this app off a local disk file (file://), open terminal in the directory and launch a server: python3 -m http.server 8000`);
+                }
+
+                // Robust check: supports Standard TIFF (42) and BigTIFF (43) for both Little and Big Endian formats
+                const isLittleEndian = firstBytes[0] === 0x49 && firstBytes[1] === 0x49;
+                const isBigEndian = firstBytes[0] === 0x4D && firstBytes[1] === 0x4D;
+                
+                let isTiffMagic = false;
+                let tiffType = "";
+                
+                if (isLittleEndian) {
+                    const version = firstBytes[2] | (firstBytes[3] << 8);
+                    if (version === 42) {
+                        isTiffMagic = true;
+                        tiffType = "Standard TIFF (Little Endian)";
+                    } else if (version === 43) {
+                        isTiffMagic = true;
+                        tiffType = "BigTIFF (Little Endian)";
+                    }
+                } else if (isBigEndian) {
+                    const version = (firstBytes[2] << 8) | firstBytes[3];
+                    if (version === 42) {
+                        isTiffMagic = true;
+                        tiffType = "Standard TIFF (Big Endian)";
+                    } else if (version === 43) {
+                        isTiffMagic = true;
+                        tiffType = "BigTIFF (Big Endian)";
+                    }
+                }
+
+                if (!isTiffMagic) {
+                    let errorDetail = `Fetched asset is not a valid GeoTIFF file.\nTarget URL: ${url}\nReceived Hex: [${hexBytes}]\nReceived ASCII: "${asciiBytes}"\n\n`;
+                    if (firstBytes[0] === 0x4E && firstBytes[1] === 0x49 && firstBytes[2] === 0x54 && firstBytes[3] === 0x46) {
+                        errorDetail += "The selected asset is a raw military NITF container (SICD/SIDD). In-browser Canvas engine only supports streaming Standard GeoTIFF formats. Please use QGIS to load raw NITFs directly.";
+                    } else {
+                        errorDetail += "Expected standard TIFF markers (II* / MM*) or BigTIFF markers (II+ / MM+). Ensure this is an orthorectified GeoTIFF image product.";
+                    }
+                    throw new Error(errorDetail);
+                }
+
+                document.getElementById('status-text').innerText = "Parsing spatial metadata...";
+                
+                // Parse spatial reference systems and metadata using GeoRaster
+                const georaster = await parseGeoraster(arrayBuffer);
+
+                document.getElementById('status-text').innerText = "Projecting and normalising SAR pixels...";
+
+                // Create a Leaflet Canvas Raster Layer on-the-fly reprojected to EPSG:3857/Web Mercator
+                activeGeoRasterLayer = new GeoRasterLayer({
+                    georaster: georaster,
+                    opacity: document.getElementById('overlay-opacity').value / 100,
+                    resolution: 128, // optimized grid size for browser performance
+                    pixelValuesToColorFn: values => {
+                        const val = values[0]; // Single band SAR amplitude values
+                        if (isNaN(val) || val === georaster.noDataValue) return null; // Make background / margins transparent
+
+                        // Normalize dynamic range of radar backscatter pixels to grayscale (0 - 255)
+                        const min = georaster.mins[0];
+                        const max = georaster.maxs[0];
+                        const normalized = (val - min) / (max - min);
+                        const byteVal = Math.min(Math.max(Math.round(normalized * 255), 0), 255);
+                        
+                        return `rgba(${byteVal}, ${byteVal}, ${byteVal}, 1)`;
+                    }
+                });
+
+                // Render dynamically on basemap
+                activeGeoRasterLayer.addTo(map);
+
+                // Auto-fit bounds to the exact raster footprint boundaries
+                map.fitBounds(activeGeoRasterLayer.getBounds(), { padding: [30, 30] });
+
+                // UI indicators
+                document.getElementById('raster-layer-status').classList.remove('hidden');
+                document.getElementById('status-text').innerText = `${tiffType} stream active`;
+                
+                btnElement.innerHTML = `<i data-lucide="check" class="w-3.5 h-3.5 text-emerald-400"></i>`;
+                lucide.createIcons();
+
+                setTimeout(() => {
+                    btnElement.innerHTML = originalContent;
+                    lucide.createIcons();
+                    btnElement.disabled = false;
+                }, 2000);
+
+            } catch (err) {
+                console.error("GeoTIFF streaming failed: ", err);
+                document.getElementById('status-text').innerText = "Raster stream failed.";
+                
+                btnElement.innerHTML = `<i data-lucide="alert-circle" class="w-3.5 h-3.5 text-red-500"></i>`;
+                lucide.createIcons();
+
+                notify("GeoTIFF Streaming Interrupted", err.message);
+
+                setTimeout(() => {
+                    btnElement.innerHTML = originalContent;
+                    lucide.createIcons();
+                    btnElement.disabled = false;
+                }, 3000);
+            }
+        }
+
+        // Clean active GeoTIFF raster streams from the map
+        function removeActiveGeoRaster() {
+            if (activeGeoRasterLayer) {
+                map.removeLayer(activeGeoRasterLayer);
+                activeGeoRasterLayer = null;
+            }
+            document.getElementById('raster-layer-status').classList.add('hidden');
+        }
+
+        // Focus and select loaded footprint details
+        function selectLoadedItem(id) {
+            // Revert previous styling of selected item
+            if (selectedItem) {
+                const prevColor = "#6366f1";
+                selectedItem.mapLayer?.setStyle({
+                    color: prevColor,
+                    weight: 2,
+                    fillOpacity: 0.15
+                });
+            }
+
+            const item = loadedItems.find(i => i.id === id);
+            if (!item) return;
+
+            selectedItem = item;
+
+            // Highlight new selected
+            item.mapLayer?.setStyle({
+                color: "#22c55e", // vibrant neon green
+                weight: 3,
+                fillOpacity: 0.3
+            });
+
+            // Recenter/fit map boundary to item
+            if (item.mapLayer) {
+                map.fitBounds(item.mapLayer.getBounds(), { maxZoom: 14, padding: [30, 30] });
+            }
+
+            // Enable elements and populate details panel
+            document.getElementById('no-item-selected').classList.add('hidden');
+            document.getElementById('item-details-panel').classList.remove('hidden');
+
+            // Quicklook Image search inside STAC properties
+            let quicklookUrl = "";
+            if (item.assets) {
+                const keys = Object.keys(item.assets);
+                const bestKey = keys.find(k => k === 'rendered_preview') || keys.find(k => k === 'thumbnail') || keys.find(k => item.assets[k].type?.includes('image/'));
+                if (bestKey) {
+                    // Resolve relative quicklook URLs using absolute source path
+                    quicklookUrl = new URL(item.assets[bestKey].href, item.sourceUrl).href;
+                }
+            }
+
+            const thumbnailEl = document.getElementById('detail-thumbnail');
+            if (quicklookUrl) {
+                thumbnailEl.src = quicklookUrl;
+                thumbnailEl.classList.remove('hidden');
+            } else {
+                thumbnailEl.classList.add('hidden');
+            }
+
+            // Populate metadata slots
+            const props = item.properties || {};
+            document.getElementById('det-incidence').innerText = props["view:incidence_angle"] ? `${parseFloat(props["view:incidence_angle"]).toFixed(2)}°` : "N/A";
+            document.getElementById('det-grazing').innerText = props["umbra:grazing_angle_degrees"] ? `${parseFloat(props["umbra:grazing_angle_degrees"]).toFixed(2)}°` : "N/A";
+            document.getElementById('det-polarization').innerText = (props["sar:polarizations"] || []).join(", ") || "N/A";
+            
+            const rngRes = props["sar:resolution_range"] ? `${parseFloat(props["sar:resolution_range"]).toFixed(2)}m` : "-";
+            const azRes = props["sar:resolution_azimuth"] ? `${parseFloat(props["sar:resolution_azimuth"]).toFixed(2)}m` : "-";
+            document.getElementById('det-resolution').innerText = (rngRes !== "-" || azRes !== "-") ? `${rngRes} / ${azRes}` : "N/A";
+
+            document.getElementById('det-slant-range').innerText = props["umbra:slant_range_kilometers"] ? `${parseFloat(props["umbra:slant_range_kilometers"]).toFixed(1)} km` : "N/A";
+            document.getElementById('det-squint').innerText = props["umbra:squint_angle_degrees"] ? `${parseFloat(props["umbra:squint_angle_degrees"]).toFixed(2)}°` : "N/A";
+            
+            document.getElementById('det-date').innerText = props.datetime ? new Date(props.datetime).toLocaleString() : "Unknown";
+            document.getElementById('det-platform').innerText = props.platform || "N/A";
+            document.getElementById('det-product').innerText = props["sar:product_type"] || "N/A";
+            document.getElementById('det-azimuth').innerText = props["umbra:target_azimuth_angle_degrees"] ? `${parseFloat(props["umbra:target_azimuth_angle_degrees"]).toFixed(1)}°` : "N/A";
+            document.getElementById('det-id').innerText = props["umbra:task_id"] || item.id || "N/A";
+
+            // Populate Assets Download Buttons
+            const assetsContainer = document.getElementById('detail-assets-list');
+            assetsContainer.innerHTML = "";
+
+            if (item.assets) {
+                Object.keys(item.assets).forEach(key => {
+                    const asset = item.assets[key];
+                    const lowerKey = key.toLowerCase();
+                    const type = (asset.type || "").toLowerCase();
+                    const lowerHref = asset.href.toLowerCase();
+                    
+                    // Native S3 Path Translator
+                    // Allows strict routing to standard AWS bucket schemas
+                    let absoluteAssetUrl = asset.href;
+                    if (absoluteAssetUrl.startsWith('s3://')) {
+                        const s3Path = absoluteAssetUrl.replace('s3://', '');
+                        absoluteAssetUrl = `https://s3.us-west-2.amazonaws.com/${s3Path}`;
+                    } else {
+                        absoluteAssetUrl = new URL(asset.href, item.sourceUrl).href;
+                    }
+
+                    // Strict GeoTIFF checker (Guard against catalog MIME type errors on JSON files)
+                    const isGeoTiff = !lowerHref.includes('.json') && !lowerKey.includes('json') && (
+                                      type.includes('geotiff') || 
+                                      type.includes('image/tiff') || 
+                                      lowerHref.includes('.tif') || 
+                                      lowerHref.includes('.tiff') || 
+                                      lowerKey === 'geotiff'
+                                      );
+
+                    // Fetch custom descriptor and icon for GIS analysts
+                    const info = getAssetFriendlyInfo(key, asset, isGeoTiff);
+
+                    // Infer file extension natively from the absolute S3 path
+                    let extension = ".bin";
+                    try {
+                        const urlObj = new URL(absoluteAssetUrl);
+                        const pathname = urlObj.pathname;
+                        const match = pathname.match(/\.[a-zA-Z0-9]+$/);
+                        if (match) {
+                            extension = match[0];
+                        }
+                    } catch (e) {}
+
+                    const assetRow = document.createElement('div');
+                    assetRow.className = "flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-slate-950 hover:bg-slate-900 rounded-lg text-xs font-semibold text-slate-300 transition-all border border-slate-800 hover:border-indigo-500/30 gap-2";
+                    
+                    const mimeTypeStr = asset.type ? asset.type.split('/').slice(-1)[0].toUpperCase() : "DATA";
+
+                    assetRow.innerHTML = `
+                        <div class="flex items-start gap-2.5 truncate">
+                            <i data-lucide="${info.icon}" class="w-4 h-4 text-indigo-400 shrink-0 mt-0.5"></i>
+                            <div class="truncate">
+                                <span class="block text-slate-200 font-semibold truncate text-left">${info.label}</span>
+                                <span class="block text-[10px] text-slate-400 font-normal truncate mt-0.5 text-left">${info.description}</span>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                            <span class="text-[9px] ${info.badgeColor} px-1.5 py-0.5 rounded uppercase font-mono">${mimeTypeStr}</span>
+                            
+                            <!-- Dynamic Play/Monitor Icon to Stream GeoTIFF directly to client map -->
+                            ${isGeoTiff ? `
+                            <button class="stream-raster-btn p-1.5 bg-indigo-650 hover:bg-indigo-500 rounded border border-indigo-600 text-white transition-all"
+                                    data-url="${absoluteAssetUrl}" title="Stream raw GeoTIFF directly onto this web map">
+                                <i data-lucide="monitor-play" class="w-3.5 h-3.5"></i>
+                            </button>
+                            ` : ''}
+
+                            <!-- Copy URL Button (Ideal for Cloud Optimized GeoTIFF/NITF Streaming directly to QGIS) -->
+                            <button class="copy-url-btn p-1.5 bg-slate-900 hover:bg-slate-800 rounded border border-slate-700 text-slate-400 hover:text-white transition-all" 
+                                    data-url="${absoluteAssetUrl}" title="Copy direct S3 URL for streaming in QGIS">
+                                <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+                            </button>
+                            
+                            <!-- Force Binary Download Button -->
+                            <button class="download-binary-btn p-1.5 bg-indigo-900/40 hover:bg-indigo-600 rounded border border-indigo-700 text-indigo-300 hover:text-white transition-all" 
+                                    data-url="${absoluteAssetUrl}" data-filename="${item.id || 'collect'}_${key}" data-ext="${extension}" title="Force Download binary file to disk">
+                                <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                            </button>
+                        </div>
+                    `;
+                    assetsContainer.appendChild(assetRow);
+                });
+
+                // Attach GeoTIFF stream on demand handlers
+                assetsContainer.querySelectorAll('.stream-raster-btn').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const url = btn.getAttribute('data-url');
+                        streamGeoTiffToMap(url, btn);
+                    });
+                });
+
+                // Attach QGIS URL Copier handlers
+                assetsContainer.querySelectorAll('.copy-url-btn').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const url = btn.getAttribute('data-url');
+                        const el = document.createElement('textarea');
+                        el.value = url;
+                        document.body.appendChild(el);
+                        el.select();
+                        document.execCommand('copy');
+                        document.body.removeChild(el);
+                        
+                        btn.innerHTML = `<i data-lucide="check" class="w-3.5 h-3.5 text-emerald-400 animate-bounce"></i>`;
+                        lucide.createIcons();
+                        setTimeout(() => {
+                            btn.innerHTML = `<i data-lucide="copy" class="w-3.5 h-3.5"></i>`;
+                            lucide.createIcons();
+                        }, 1500);
+                    });
+                });
+
+                // Attach Forced binary downloader handlers
+                assetsContainer.querySelectorAll('.download-binary-btn').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const url = btn.getAttribute('data-url');
+                        const filename = btn.getAttribute('data-filename');
+                        const ext = btn.getAttribute('data-ext');
+                        forceDownloadAsset(url, filename, ext, btn);
+                    });
+                });
+            }
+
+            lucide.createIcons();
+
+            // Refresh Map Overlay configurations
+            // Automatically uncheck projection overlay and wipe active rasters to prevent overlapping
+            document.getElementById('overlay-map-toggle').checked = false;
+            removeMapOverlay();
+            removeActiveGeoRaster();
+
+            // Highlight dynamic row in list panel
+            updateLoadedItemsUIList();
+        }
+
+        // Toggle Quicklook Map Projection Overlay (PNG preview feature)
+        function toggleMapOverlay() {
+            const toggleState = document.getElementById('overlay-map-toggle').checked;
+            
+            if (!toggleState) {
+                removeMapOverlay();
+                return;
+            }
+
+            if (!selectedItem || !selectedItem.geometry) {
+                notify("Overlay Error", "No spatial polygon geometry available on this footprint.");
+                document.getElementById('overlay-map-toggle').checked = false;
+                return;
+            }
+
+            let imageUrl = "";
+            if (selectedItem.assets) {
+                const keys = Object.keys(selectedItem.assets);
+                const bestKey = keys.find(k => k === 'rendered_preview') || keys.find(k => k === 'thumbnail') || keys.find(k => selectedItem.assets[k].type?.includes('image/'));
+                if (bestKey) {
+                    // Resolve relative thumbnail images as well
+                    imageUrl = new URL(selectedItem.assets[bestKey].href, selectedItem.sourceUrl).href;
+                }
+            }
+
+            if (!imageUrl) {
+                notify("Asset Error", "No image Quicklook preview URL located in this footprint's STAC assets.");
+                document.getElementById('overlay-map-toggle').checked = false;
+                return;
+            }
+
+            // Extract lat-long bounds coordinates
+            const geojsonLayer = L.geoJSON(selectedItem);
+            const bounds = geojsonLayer.getBounds();
+
+            const opacityVal = document.getElementById('overlay-opacity').value / 100;
+
+            removeMapOverlay();
+
+            // Apply Leaflet Image Overlay to bounds
+            quicklookOverlayLayer = L.imageOverlay(imageUrl, bounds, {
+                opacity: opacityVal,
+                interactive: false,
+                zIndex: 500
+            }).addTo(map);
+
+            document.getElementById('status-text').innerText = "Quicklook Projected on Map";
+        }
+
+        // Wipe active Leaflet image projection layer
+        function removeMapOverlay() {
+            if (quicklookOverlayLayer) {
+                map.removeLayer(quicklookOverlayLayer);
+                quicklookOverlayLayer = null;
+            }
+        }
+
+        // Apply interactive sidebar queries/filters
+        function applyFilters() {
+            const searchQuery = document.getElementById('filter-search').value.toLowerCase().trim();
+            const minIncidence = parseInt(document.getElementById('filter-incidence').value) || 0;
+            const selectedPlatform = document.getElementById('filter-platform').value;
+            
+            // Collect checked polarizations
+            const checkedPols = Array.from(document.querySelectorAll('.polarization-filter:checked')).map(el => el.value);
+
+            filteredItems = loadedItems.filter(item => {
+                const props = item.properties || {};
+                
+                // Text search match on location, target name, metadata ID, task ID
+                const targetName = (props["umbra:target_name"] || "").toLowerCase();
+                const taskId = (props["umbra:task_id"] || "").toLowerCase();
+                const id = (item.id || "").toLowerCase();
+                const textMatch = !searchQuery || targetName.includes(searchQuery) || taskId.includes(searchQuery) || id.includes(searchQuery);
+
+                // Incidence limit
+                const incidenceVal = parseFloat(props["view:incidence_angle"]) || 0;
+                const incidenceMatch = incidenceVal >= minIncidence;
+
+                // Polarization match
+                const itemPols = props["sar:polarizations"] || [];
+                const polsMatch = checkedPols.length === 0 || checkedPols.some(p => itemPols.includes(p));
+
+                // Platform selection
+                const platformMatch = selectedPlatform === 'ALL' || props.platform === selectedPlatform;
+
+                return textMatch && incidenceMatch && polsMatch && platformMatch;
+            });
+
+            // Update Map Layers visibility
+            loadedItems.forEach(item => {
+                if (item.mapLayer) {
+                    if (filteredItems.some(f => f.id === item.id)) {
+                        footprintGroup.addLayer(item.mapLayer);
+                    } else {
+                        footprintGroup.removeLayer(item.mapLayer);
+                    }
+                }
+            });
+
+            document.getElementById('status-text').innerText = `Filter matches: ${filteredItems.length} of ${loadedItems.length}`;
+            updateLoadedItemsUIList();
+        }
+
+        // Center map projection automatically to encompass all current layers
+        function fitMapToFootprints() {
+            if (footprintGroup && footprintGroup.getLayers().length > 0) {
+                map.fitBounds(footprintGroup.getBounds(), { padding: [40, 40] });
+            } else {
+                notify("Fit Map Bounds", "No active footprints rendered on map to align views.");
+            }
+        }
+
+        // Standard Purge Routine
+        function clearAllLoadedData() {
+            removeMapOverlay();
+            removeActiveGeoRaster();
+            footprintGroup.clearLayers();
+            loadedItems = [];
+            filteredItems = [];
+            selectedItem = null;
+
+            document.getElementById('no-item-selected').classList.remove('hidden');
+            document.getElementById('item-details-panel').classList.add('hidden');
+            document.getElementById('overlay-map-toggle').checked = false;
+
+            document.getElementById('filter-search').value = "";
+            document.getElementById('filter-incidence').value = 0;
+            document.getElementById('incidence-val-label').innerText = "Any";
+            document.getElementById('filter-platform').innerHTML = `<option value="ALL">All Platforms</option>`;
+
+            updateLoadedItemsUIList();
+            updateAnalyticsCharts();
+            
+            document.getElementById('status-text').innerText = "All footprints wiped.";
+        }
+
+        // Dynamic Chart Engine utilizing ChartJS
+        function updateAnalyticsCharts() {
+            if (loadedItems.length === 0) {
+                // Destroy charts if empty
+                destroyAllCharts();
+                return;
+            }
+
+            const dataItems = filteredItems.length > 0 ? filteredItems : loadedItems;
+
+            // 1. Incidence Angles Data Parsing
+            const incidenceAngles = dataItems.map(i => parseFloat(i.properties?.["view:incidence_angle"])).filter(v => !isNaN(v));
+            const buckets = { "20-30°": 0, "30-40°": 0, "40-50°": 0, "50-60°": 0, "60°+": 0 };
+            incidenceAngles.forEach(v => {
+                if (v >= 20 && v < 30) buckets["20-30°"]++;
+                else if (v >= 30 && v < 40) buckets["30-40°"]++;
+                else if (v >= 40 && v < 50) buckets["40-50°"]++;
+                else if (v >= 50 && v < 60) buckets["50-60°"]++;
+                else if (v >= 60) buckets["60°+"]++;
+            });
+
+            // 2. Polarizations breakdown
+            const polCounts = {};
+            dataItems.forEach(i => {
+                const pols = i.properties?.["sar:polarizations"] || [];
+                pols.forEach(p => {
+                    polCounts[p] = (polCounts[p] || 0) + 1;
+                });
+            });
+
+            // 3. Platform Breakdown
+            const platformCounts = {};
+            dataItems.forEach(i => {
+                const plat = i.properties?.platform || "Unknown";
+                platformCounts[plat] = (platformCounts[plat] || 0) + 1;
+            });
+
+            // Draw Charts
+            renderIncidenceChart(buckets);
+            renderPolarizationChart(polCounts);
+            renderPlatformChart(platformCounts);
+        }
+
+        // Render standard bar histogram of SAR collected angles
+        function renderIncidenceChart(buckets) {
+            const ctx = document.getElementById('incidenceChart').getContext('2d');
+            if (incidenceChartInstance) incidenceChartInstance.destroy();
+
+            incidenceChartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: Object.keys(buckets),
+                    datasets: [{
+                        label: 'SAR Collects Count',
+                        data: Object.values(buckets),
+                        backgroundColor: 'rgba(99, 102, 241, 0.45)', // indigo
+                        borderColor: '#6366f1',
+                        borderWidth: 1.5,
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 9 } } },
+                        y: { grid: { color: '#1e293b' }, ticks: { color: '#94a3b8', font: { size: 9 }, stepSize: 5 } }
+                    }
+                }
+            });
+        }
+
+        // Render circular polarization percentages
+        function renderPolarizationChart(polCounts) {
+            const ctx = document.getElementById('polarizationChart').getContext('2d');
+            if (polarizationChartInstance) polarizationChartInstance.destroy();
+
+            const labels = Object.keys(polCounts);
+            if (labels.length === 0) return;
+
+            polarizationChartInstance = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: Object.values(polCounts),
+                        backgroundColor: ['#6366f1', '#ec4899', '#f43f5e', '#e2e8f0'],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { 
+                        legend: { 
+                            position: 'bottom',
+                            labels: { color: '#94a3b8', boxWidth: 8, font: { size: 9 } } 
+                        } 
+                    }
+                }
+            });
+        }
+
+        // Render platform circular stats
+        function renderPlatformChart(platformCounts) {
+            const ctx = document.getElementById('platformChart').getContext('2d');
+            if (platformChartInstance) platformChartInstance.destroy();
+
+            const labels = Object.keys(platformCounts);
+            if (labels.length === 0) return;
+
+            platformChartInstance = new Chart(ctx, {
+                type: 'pie',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: Object.values(platformCounts),
+                        backgroundColor: ['#22c55e', '#3b82f6', '#eab308', '#a855f7'],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { 
+                        legend: { 
+                            position: 'bottom',
+                            labels: { color: '#94a3b8', boxWidth: 8, font: { size: 9 } } 
+                        } 
+                    }
+                }
+            });
+        }
+
+        // Clean out charts from active view memory
+        function destroyAllCharts() {
+            if (incidenceChartInstance) { incidenceChartInstance.destroy(); incidenceChartInstance = null; }
+            if (polarizationChartInstance) { polarizationChartInstance.destroy(); polarizationChartInstance = null; }
+            if (platformChartInstance) { platformChartInstance.destroy(); platformChartInstance = null; }
+        }
+
+        // Export active collections footprints as standard GeoJSON
+        function exportGeoJSON() {
+            if (loadedItems.length === 0) {
+                notify("Export Blocked", "No active STAC footprint coordinates loaded inside workspace.");
+                return;
+            }
+
+            const cleanCollection = {
+                type: "FeatureCollection",
+                name: "Umbra_SAR_Export",
+                features: loadedItems.map(item => {
+                    // Extract safe copy without Map reference
+                    const { mapLayer, ...safeItem } = item;
+                    return safeItem;
+                })
+            };
+
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(cleanCollection, null, 2));
+            const downloadAnchor = document.createElement('a');
+            downloadAnchor.setAttribute("href", dataStr);
+            downloadAnchor.setAttribute("download", "umbra_sar_footprints.geojson");
+            document.body.appendChild(downloadAnchor);
+            downloadAnchor.click();
+            downloadAnchor.remove();
+
+            document.getElementById('status-text').innerText = "GeoJSON Footprints Exported";
+        }
+
+        // Export metadata properties as tabular CSV
+        function exportCSV() {
+            if (loadedItems.length === 0) {
+                notify("Export Blocked", "No active STAC footprints loaded inside workspace.");
+                return;
+            }
+
+            const headers = [
+                "ID", "Platform", "Sensing_Time", "Incidence_Angle", 
+                "Grazing_Angle", "Resolution_Range", "Resolution_Azimuth", 
+                "Polarization", "Slant_Range_KM", "Target_Name", "Product_Type"
+            ];
+
+            const csvRows = [headers.join(",")];
+
+            loadedItems.forEach(item => {
+                const props = item.properties || {};
+                const pols = (props["sar:polarizations"] || []).join("/");
+                
+                const row = [
+                    item.id || "",
+                    props.platform || "",
+                    props.datetime || "",
+                    props["view:incidence_angle"] || "",
+                    props["umbra:grazing_angle_degrees"] || "",
+                    props["sar:resolution_range"] || "",
+                    props["sar:resolution_azimuth"] || "",
+                    pols,
+                    props["umbra:slant_range_kilometers"] || "",
+                    `"${(props["umbra:target_name"] || "").replace(/"/g, '""')}"`,
+                    props["sar:product_type"] || ""
+                ];
+
+                csvRows.push(row.join(","));
+            });
+
+            const csvContent = "data:text/csv;charset=utf-8," + encodeURIComponent(csvRows.join("\n"));
+            const downloadAnchor = document.createElement('a');
+            downloadAnchor.setAttribute("href", csvContent);
+            downloadAnchor.setAttribute("download", "umbra_sar_metadata_table.csv");
+            document.body.appendChild(downloadAnchor);
+            downloadAnchor.click();
+            downloadAnchor.remove();
+
+            document.getElementById('status-text').innerText = "CSV Tabular Data Exported";
+        }
+    </script>
+</body>
+</html>
