@@ -496,20 +496,27 @@
         function translateS3Url(rawHref, sourceUrl) {
             if (!rawHref) return "";
             
-            // Critical Fix: Replace literal spaces with URL-encoded spaces early 
-            // Web Worker `fetch()` completely crashes if passed literal spaces in a string.
-            let finalUrl = rawHref.replace(/ /g, '%20');
+            // Clean input
+            let finalUrl = rawHref.trim();
 
-            // Handle s3:// protocol
             if (finalUrl.startsWith('s3://')) {
                 const parts = finalUrl.replace('s3://', '').split('/');
                 const bucket = parts.shift();
                 const s3Path = parts.join('/');
                 finalUrl = `https://${bucket}.s3.us-west-2.amazonaws.com/${s3Path}`;
+            } else if (finalUrl.startsWith('http://') || finalUrl.startsWith('https://')) {
+                // Already an absolute URL, do nothing
             } else {
-                try {
-                    finalUrl = new URL(finalUrl, sourceUrl).href;
-                } catch(e) {}
+                // It is a relative path. We MUST resolve it against the source STAC Item URL
+                if (sourceUrl) {
+                    try {
+                        finalUrl = new URL(finalUrl, sourceUrl).href;
+                    } catch(e) {
+                        // Fallback manual resolution if URL class fails
+                        const base = sourceUrl.substring(0, sourceUrl.lastIndexOf('/'));
+                        finalUrl = `${base}/${finalUrl.replace('./', '')}`;
+                    }
+                }
             }
 
             // 1. Force HTTPS to prevent Mixed Content blocks on GitHub Pages
@@ -522,12 +529,13 @@
                 finalUrl = finalUrl.replace('s3.amazonaws.com', 's3.us-west-2.amazonaws.com');
             }
 
-            // 3. Prevent hitting HTML directory viewers
+            // 3. Prevent hitting HTML directory viewers (e.g. s3-website)
             if (finalUrl.includes('.s3-website.')) {
                 finalUrl = finalUrl.replace('.s3-website.', '.s3.');
             }
 
-            return finalUrl;
+            // Return URL safely encoded for fetch operations
+            return finalUrl.replace(/ /g, '%20');
         }
 
         window.onload = function() {
@@ -1171,6 +1179,12 @@
 
         // Dynamic Client-Side GeoTIFF/COG Streaming Engine using Main Thread ArrayBuffer
         async function streamGeoTiffToMap(url, btnElement) {
+            
+            if (!url || !url.startsWith('http')) {
+                notify("Stream Error", "Cannot stream a missing or invalid relative URL. Please ensure STAC links are properly formatted.");
+                return;
+            }
+
             document.getElementById('status-text').innerText = "Downloading GeoTIFF (May take a moment)...";
             
             // Show loading spinner on button
@@ -1189,9 +1203,9 @@
                 
                 if (!response.ok) {
                     if (response.status === 404) {
-                        throw new Error(`404 Not Found: The STAC catalog references this asset, but the physical file does not actually exist on the AWS S3 bucket. (Target: ${url})`);
+                        throw new Error(`404 Not Found: The STAC catalog references this asset, but the physical file does not actually exist on the AWS S3 bucket.\n(Target: ${url})`);
                     } else if (response.status === 403) {
-                        throw new Error(`403 Forbidden: AWS blocked access to this file. (Target: ${url})`);
+                        throw new Error(`403 Forbidden: AWS blocked access to this file.\n(Target: ${url})`);
                     }
                     throw new Error(`HTTP error! status: ${response.status} on ${url}`);
                 }
@@ -1213,7 +1227,7 @@
                 }
                 if (firstBytes[0] === 0x3C) { // '<'
                     if (firstBytes[1] === 0x21) { // '<!' e.g. <!DOCTYPE html>
-                        throw new Error(`The server returned an HTML webpage instead of a GeoTIFF image.\n\nTarget URL: ${url}\nReceived ASCII: "${asciiBytes}"\n\nThis means the catalog link points to a web viewer (like an S3 directory page).`);
+                        throw new Error(`The server returned an HTML webpage instead of a GeoTIFF image.\n\nTarget URL: ${url}\nReceived ASCII: "${asciiBytes}"\n\nThis means the catalog link points to a web viewer (like an S3 directory page) or the URL was invalid and your host returned a 404 page.`);
                     } else { // '<?' e.g. <?xml
                         throw new Error(`AWS S3 rejected the request and returned an XML error document.\n\nTarget URL: ${url}\nReceived ASCII: "${asciiBytes}"\n\nThis usually means 403 Access Denied or 404 Not Found on the bucket.`);
                     }
@@ -1395,7 +1409,7 @@
                         type.includes('geotiff')
                     );
                     
-                    if (isGeoTiff && !primaryGeoTiffUrl) {
+                    if (isGeoTiff && !primaryGeoTiffUrl && absoluteUrl !== "") {
                         primaryGeoTiffUrl = absoluteUrl;
                         geoTiffItemTitle = asset.title || key;
                     }
@@ -1409,7 +1423,7 @@
                         type.includes('jpeg')
                     );
                     
-                    if (isPreviewImage && !quicklookUrl) {
+                    if (isPreviewImage && !quicklookUrl && absoluteUrl !== "") {
                         quicklookUrl = absoluteUrl;
                     }
                 }
@@ -1473,6 +1487,7 @@
                     const lowerKey = key.toLowerCase();
                     
                     const absoluteAssetUrl = translateS3Url(href, item.sourceUrl);
+                    if (!absoluteAssetUrl) return; // skip missing urls
 
                     // Safely extract extension
                     let extension = ".bin";
