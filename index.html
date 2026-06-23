@@ -450,6 +450,7 @@
             if (!rawHref) return "";
             let finalUrl = rawHref;
 
+            // Handle s3:// protocol
             if (rawHref.startsWith('s3://')) {
                 const parts = rawHref.replace('s3://', '').split('/');
                 const bucket = parts.shift();
@@ -459,7 +460,17 @@
                 finalUrl = new URL(rawHref, sourceUrl).href;
             }
 
-            // Forcefully override HTML directory viewer links back to the direct binary REST endpoint
+            // 1. Force HTTPS to prevent Mixed Content blocks on GitHub Pages
+            if (finalUrl.startsWith('http://')) {
+                finalUrl = finalUrl.replace('http://', 'https://');
+            }
+
+            // 2. Normalize AWS S3 URLs to virtual-hosted format with region to ensure CORS compliance
+            if (finalUrl.includes('s3.amazonaws.com')) {
+                finalUrl = finalUrl.replace('s3.amazonaws.com', 's3.us-west-2.amazonaws.com');
+            }
+
+            // 3. Prevent hitting HTML directory viewers
             if (finalUrl.includes('.s3-website.')) {
                 finalUrl = finalUrl.replace('.s3-website.', '.s3.');
             }
@@ -1108,7 +1119,7 @@
 
         // Dynamic Client-Side GeoTIFF/COG Streaming Engine
         async function streamGeoTiffToMap(url, btnElement) {
-            document.getElementById('status-text').innerText = "Streaming GeoTIFF bytes...";
+            document.getElementById('status-text').innerText = "Connecting to Cloud Optimized GeoTIFF...";
             
             // Show loading spinner on button
             const originalContent = btnElement.innerHTML;
@@ -1120,76 +1131,10 @@
                 // Clear any existing georaster layer first
                 removeActiveGeoRaster();
 
-                // Fetch arraybuffer bytes directly from AWS S3
-                const response = await fetch(url);
-                if (!response.ok) {
-                    if (response.status === 404) {
-                        throw new Error(`404 Not Found: The STAC catalog references this asset, but the physical file does not actually exist on the AWS S3 bucket. (Target: ${url})`);
-                    } else if (response.status === 403) {
-                        throw new Error(`403 Forbidden: AWS blocked access to this file. (Target: ${url})`);
-                    }
-                    throw new Error(`HTTP error! status: ${response.status} on ${url}`);
-                }
-                
-                const arrayBuffer = await response.arrayBuffer();
-
-                // CRITICAL SAFETY CHECK: Inspect magic bytes to prevent georaster from throwing "Invalid byte order value"
-                if (arrayBuffer.byteLength < 4) {
-                    throw new Error("S3 returned an empty file payload.");
-                }
-                const firstBytes = new Uint8Array(arrayBuffer.slice(0, 4));
-                const asciiBytes = Array.from(firstBytes).map(b => (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.').join('');
-
-                // Distinguish between HTML Webpages and XML Errors based on the first two bytes
-                if (firstBytes[0] === 0x3C) { // '<'
-                    if (firstBytes[1] === 0x21) { // '<!' e.g. <!DOCTYPE html>
-                        throw new Error(`The server returned an HTML webpage instead of a GeoTIFF image.\n\nReceived ASCII: "${asciiBytes}"\n\nThis means the catalog link points to a web viewer (like an S3 directory page) or your network proxy intercepted the request.`);
-                    } else { // '<?' e.g. <?xml
-                        throw new Error(`AWS S3 rejected the request and returned an XML error document.\n\nReceived ASCII: "${asciiBytes}"\n\nThis usually means 403 Access Denied or 404 Not Found on the bucket.`);
-                    }
-                }
-
-                // Robust check: supports Standard TIFF (42) and BigTIFF (43) for both Little and Big Endian formats
-                const isLittleEndian = firstBytes[0] === 0x49 && firstBytes[1] === 0x49;
-                const isBigEndian = firstBytes[0] === 0x4D && firstBytes[1] === 0x4D;
-                
-                let isTiffMagic = false;
-                let tiffType = "";
-                
-                if (isLittleEndian) {
-                    const version = firstBytes[2] | (firstBytes[3] << 8);
-                    if (version === 42) {
-                        isTiffMagic = true;
-                        tiffType = "Standard TIFF (Little Endian)";
-                    } else if (version === 43) {
-                        isTiffMagic = true;
-                        tiffType = "BigTIFF (Little Endian)";
-                    }
-                } else if (isBigEndian) {
-                    const version = (firstBytes[2] << 8) | firstBytes[3];
-                    if (version === 42) {
-                        isTiffMagic = true;
-                        tiffType = "Standard TIFF (Big Endian)";
-                    } else if (version === 43) {
-                        isTiffMagic = true;
-                        tiffType = "BigTIFF (Big Endian)";
-                    }
-                }
-
-                if (!isTiffMagic) {
-                    let errorDetail = `Fetched asset is not a valid GeoTIFF file.\nReceived ASCII: "${asciiBytes}"\n\n`;
-                    if (firstBytes[0] === 0x4E && firstBytes[1] === 0x49 && firstBytes[2] === 0x54 && firstBytes[3] === 0x46) {
-                        errorDetail += "The selected asset is a raw military NITF container (SICD/SIDD). In-browser Canvas engine only supports streaming Standard GeoTIFF formats. Please use QGIS to load raw NITFs directly.";
-                    } else {
-                        errorDetail += "Expected standard TIFF markers (II* / MM*) or BigTIFF markers (II+ / MM+). Ensure this is an orthorectified GeoTIFF image product.";
-                    }
-                    throw new Error(errorDetail);
-                }
-
-                document.getElementById('status-text').innerText = "Parsing spatial metadata...";
-                
-                // Parse spatial reference systems and metadata using GeoRaster
-                const georaster = await parseGeoraster(arrayBuffer);
+                // PASS THE URL DIRECTLY! 
+                // Georaster will automatically use HTTP Range Requests to fetch only the necessary bytes.
+                // This prevents browser memory crashes from downloading massive SAR rasters into ArrayBuffers.
+                const georaster = await parseGeoraster(url);
 
                 document.getElementById('status-text').innerText = "Projecting and normalising SAR pixels...";
 
@@ -1220,7 +1165,7 @@
 
                 // UI indicators
                 document.getElementById('raster-layer-status').classList.remove('hidden');
-                document.getElementById('status-text').innerText = `${tiffType} stream active`;
+                document.getElementById('status-text').innerText = `GeoTIFF stream active`;
                 
                 btnElement.innerHTML = `<i data-lucide="check-circle" class="w-4 h-4 text-emerald-300"></i> Stream Live`;
                 lucide.createIcons();
