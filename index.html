@@ -543,8 +543,10 @@
         ];
 
         function refreshIcons() {
+            // Safe wrapper for Lucide icons. Do not call window.refreshIcons() here;
+            // this function is itself exposed on window and recursive calls freeze app boot.
             if (window.lucide && typeof window.lucide.createIcons === 'function') {
-                window.refreshIcons();
+                window.lucide.createIcons();
             }
         }
 
@@ -1026,6 +1028,32 @@
             return ok;
         }
 
+        function showStartupFailure(title, error) {
+            const message = error && error.message ? error.message : String(error || 'Unknown startup error');
+            console.error(title, error);
+            const status = document.getElementById('status-text');
+            if (status) status.innerText = title;
+
+            const tree = document.getElementById('stac-tree-list');
+            if (tree && /Loading STAC index/i.test(tree.textContent || '')) {
+                tree.innerHTML = `
+                    <div class="p-6 text-center text-red-400">
+                        <i data-lucide="x-circle" class="w-6 h-6 mx-auto mb-2"></i>
+                        <p class="text-xs font-semibold">${escapeHtml(title)}</p>
+                        <p class="text-[10px] text-red-300 mt-2 leading-relaxed">${escapeHtml(message)}</p>
+                    </div>`;
+                refreshIcons();
+            }
+        }
+
+        window.addEventListener('error', event => {
+            showStartupFailure('Runtime Error During App Boot', event.error || event.message);
+        });
+
+        window.addEventListener('unhandledrejection', event => {
+            showStartupFailure('Async Runtime Error During App Boot', event.reason);
+        });
+
         function initializeApplication() {
             // Detect if running locally on file:// protocol
             if (window.location.protocol === 'file:') {
@@ -1125,10 +1153,18 @@
             loadStacNode(activeCatalogUrl);
         }
 
+        function bootApplicationSafely() {
+            try {
+                initializeApplication();
+            } catch (err) {
+                showStartupFailure('Application Startup Failed', err);
+            }
+        }
+
         if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', initializeApplication);
+            document.addEventListener('DOMContentLoaded', bootApplicationSafely);
         } else {
-            initializeApplication();
+            bootApplicationSafely();
         }
 
         function notify(title, message) {
