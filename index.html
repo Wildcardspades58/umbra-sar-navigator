@@ -72,7 +72,7 @@
             <div>
                 <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
                     Umbra SAR Navigator 
-                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.2.6</span>
+                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.0</span>
                     <span class="text-xs bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded font-normal">Analyst Tool</span>
                 </h1>
                 <p class="text-xs text-slate-400">Interactive OpenStreetMap client for Umbra Space SpatioTemporal Asset Catalogs</p>
@@ -494,153 +494,323 @@
         let platformChartInstance = null;
 
         // General URL Translator (converts s3:// paths and website endpoints to direct virtual-hosted AWS endpoints)
+        // General URL Translator (converts s3:// paths, path-style AWS URLs, and S3 website endpoints to direct object API endpoints)
         function translateS3Url(rawHref, sourceUrl) {
             if (!rawHref) return "";
-            
-            // Clean input by explicitly replacing literal spaces with %20 so URL parser doesn't choke
-            let urlStr = String(rawHref).trim().replace(/ /g, '%20');
 
-            if (urlStr.startsWith('s3://')) {
-                const parts = urlStr.replace('s3://', '').split('/');
-                const bucket = parts.shift();
-                urlStr = `https://${bucket}.s3.us-west-2.amazonaws.com/${parts.join('/')}`;
-            } else if (!urlStr.startsWith('http://') && !urlStr.startsWith('https://')) {
-                // It is a relative path. Resolve it against the source STAC Item URL
-                if (sourceUrl) {
-                    try {
-                        urlStr = new URL(urlStr, sourceUrl).href;
-                    } catch(e) {
-                        const base = sourceUrl.substring(0, sourceUrl.lastIndexOf('/'));
-                        urlStr = `${base}/${urlStr.replace(/^\.\//, '')}`;
+            // Normalize whitespace before parsing. Encoded spaces remain encoded; literal spaces are made URL-safe.
+            let urlStr = String(rawHref).trim().replace(/\s/g, '%20');
+
+            try {
+                // Convert native S3 URIs into virtual-hosted HTTPS object URLs.
+                if (urlStr.startsWith('s3://')) {
+                    const noScheme = urlStr.substring(5);
+                    const slashIdx = noScheme.indexOf('/');
+                    const bucket = slashIdx >= 0 ? noScheme.substring(0, slashIdx) : noScheme;
+                    const key = slashIdx >= 0 ? noScheme.substring(slashIdx + 1) : '';
+                    urlStr = `https://${bucket}.s3.us-west-2.amazonaws.com/${key}`;
+                } else if (!/^https?:\/\//i.test(urlStr)) {
+                    // Resolve relative STAC asset links against the source Item URL.
+                    urlStr = new URL(urlStr, sourceUrl || window.location.href).href;
+                }
+
+                let u = new URL(urlStr);
+
+                // Force HTTPS to avoid mixed-content browser blocking.
+                u.protocol = 'https:';
+
+                // Path-style S3: https://s3.us-west-2.amazonaws.com/bucket/key
+                // Convert to virtual-hosted S3: https://bucket.s3.us-west-2.amazonaws.com/key
+                const pathStyleMatch = u.hostname.match(/^s3[.-]([a-z0-9-]+)?\.amazonaws\.com$/i);
+                if (pathStyleMatch) {
+                    const parts = u.pathname.replace(/^\/+/, '').split('/');
+                    const bucket = parts.shift();
+                    const key = parts.join('/');
+                    const region = pathStyleMatch[1] || 'us-west-2';
+                    if (bucket && key) {
+                        u.hostname = `${bucket}.s3.${region}.amazonaws.com`;
+                        u.pathname = '/' + key;
                     }
                 }
+
+                // S3 website endpoints return HTML directory pages; convert to the REST object endpoint.
+                // Handles both bucket.s3-website.us-west-2.amazonaws.com and bucket.s3-website-us-west-2.amazonaws.com
+                const websiteDot = u.hostname.match(/^(.+)\.s3-website[.-]([a-z0-9-]+)\.amazonaws\.com$/i);
+                if (websiteDot) {
+                    u.hostname = `${websiteDot[1]}.s3.${websiteDot[2]}.amazonaws.com`;
+                }
+
+                // Some STAC links point to "?prefix=key" S3 browser pages. Treat the prefix as the object key.
+                const prefix = u.searchParams.get('prefix');
+                if (prefix) {
+                    u.pathname = '/' + prefix.replace(/^\/+/, '');
+                    u.search = '';
+                    u.hash = '';
+                }
+
+                // Default bare "s3.amazonaws.com" host to us-west-2 because the Umbra Open Data bucket lives there.
+                u.hostname = u.hostname.replace(/^s3\.amazonaws\.com$/i, 's3.us-west-2.amazonaws.com');
+
+                return u.href;
+            } catch (e) {
+                // Final fallback keeps the app usable for unusual STAC hrefs while still enforcing HTTPS.
+                return urlStr.replace(/^http:\/\//i, 'https://');
             }
-
-            // Rescue "?prefix=" directory queries and convert to absolute object paths
-            if (urlStr.includes('?prefix=')) {
-                try {
-                    const u = new URL(urlStr);
-                    const prefix = u.searchParams.get('prefix');
-                    if (prefix) {
-                        const host = u.hostname.replace('.s3-website.', '.s3.');
-                        urlStr = `https://${host}/${prefix}`;
-                    }
-                } catch(e) {}
-            }
-
-            // Force HTTPS
-            urlStr = urlStr.replace('http://', 'https://');
-
-            // Normalize AWS S3 URLs to virtual-hosted format with region to ensure CORS compliance
-            if (urlStr.includes('s3.amazonaws.com')) {
-                urlStr = urlStr.replace('s3.amazonaws.com', 's3.us-west-2.amazonaws.com');
-            }
-
-            // Prevent hitting HTML directory viewers (e.g. s3-website)
-            if (urlStr.includes('.s3-website.')) {
-                urlStr = urlStr.replace('.s3-website.', '.s3.');
-            }
-
-            return urlStr;
         }
 
-        window.onload = function() {
-            // Detect if running locally on file:// protocol
-            if (window.location.protocol === 'file:') {
-                document.getElementById('local-protocol-warning').classList.remove('hidden');
+        // Safely parse a URL; returns null for malformed hrefs without throwing into the UI event loop.
+        function safeUrlObject(url) {
+            try {
+                return new URL(url);
+            } catch (e) {
+                return null;
+            }
+        }
+
+        // Strip query/hash noise and return the lower-case object pathname for strict file-extension tests.
+        function getAssetPathname(url) {
+            const parsed = safeUrlObject(url);
+            if (parsed) {
+                try {
+                    return decodeURIComponent(parsed.pathname).toLowerCase().trim();
+                } catch (e) {
+                    return parsed.pathname.toLowerCase().trim();
+                }
+            }
+            return String(url || "").toLowerCase().split('?')[0].split('#')[0].trim();
+        }
+
+        // Strict extension check: MIME types and STAC asset keys are treated as advisory only because Umbra STAC entries can be mislabeled.
+        function hasStrictExtension(pathname, extensions) {
+            return extensions.some(ext => pathname.endsWith(ext));
+        }
+
+        // Classify STAC assets by the resolved object pathname first. This prevents false positives such as "identifier" or mislabeled JSON assets.
+        function classifyStacAsset(key, asset, sourceUrl) {
+            const href = String(asset?.href || "");
+            const type = String(asset?.type || "").toLowerCase();
+            const lowerKey = String(key || "").toLowerCase();
+            const absoluteUrl = translateS3Url(href, sourceUrl);
+            const pathname = getAssetPathname(absoluteUrl);
+
+            const isJson = hasStrictExtension(pathname, ['.json', '.geojson']) || lowerKey === 'gjd' || type.includes('json');
+            const isNitf = hasStrictExtension(pathname, ['.nitf', '.ntf']) || lowerKey === 'sicd' || lowerKey === 'sidd' || type.includes('nitf');
+            const isHtmlViewer = hasStrictExtension(pathname, ['.html', '.htm']) || absoluteUrl.includes('?prefix=') || absoluteUrl.includes('s3-website');
+
+            // GeoTIFF stream buttons are ONLY allowed for real object paths ending in .tif/.tiff.
+            // Do not use key-name substring checks or MIME checks here; those caused the invalid-byte-order failures.
+            const isGeoTiff = !isJson && !isNitf && !isHtmlViewer && hasStrictExtension(pathname, ['.tif', '.tiff']);
+
+            const isPreviewImage = !isJson && !isNitf && !isGeoTiff && !isHtmlViewer && (
+                hasStrictExtension(pathname, ['.png', '.jpg', '.jpeg', '.webp']) ||
+                type.includes('png') ||
+                type.includes('jpeg') ||
+                type.includes('jpg') ||
+                lowerKey === 'thumbnail' ||
+                lowerKey === 'rendered_preview'
+            );
+
+            let extension = ".bin";
+            const match = pathname.match(/\.[a-z0-9]+$/i);
+            if (match) extension = match[0];
+
+            return {
+                absoluteUrl,
+                pathname,
+                isJson,
+                isNitf,
+                isHtmlViewer,
+                isGeoTiff,
+                isPreviewImage,
+                extension
+            };
+        }
+
+        // Human-readable byte counter for stream progress messages.
+        function formatBytes(bytes) {
+            const n = Number(bytes || 0);
+            if (!Number.isFinite(n) || n <= 0) return "0 B";
+            const units = ["B", "KB", "MB", "GB"];
+            const idx = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1);
+            return `${(n / Math.pow(1024, idx)).toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
+        }
+
+        // Convert the first bytes of a payload into forensic details for clear UI errors.
+        function describeLeadingBytes(arrayBuffer) {
+            const view = new Uint8Array(arrayBuffer.slice(0, Math.min(16, arrayBuffer.byteLength)));
+            const hex = Array.from(view.slice(0, 8)).map(b => '0x' + b.toString(16).toUpperCase().padStart(2, '0')).join(', ');
+            const ascii = Array.from(view.slice(0, 8)).map(b => (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.').join('');
+            return { view, hex, ascii };
+        }
+
+        // Strict magic-byte validator. This catches HTML, XML/S3 errors, JSON manifests, NITF, and non-TIFF binaries before georaster sees them.
+        function validateGeoTiffMagic(arrayBuffer, url) {
+            if (!arrayBuffer || arrayBuffer.byteLength < 4) {
+                throw new Error("S3 returned an empty or truncated payload; no raster header was present.");
             }
 
-            // Initialize Icons
-            lucide.createIcons();
+            const { view, hex, ascii } = describeLeadingBytes(arrayBuffer);
 
-            // Setup Custom Modal Handlers
-            document.getElementById('modal-close-btn').addEventListener('click', () => {
-                document.getElementById('modal-container').classList.add('hidden');
+            if (view[0] === 0x7B) {
+                throw new Error(`Fetched asset is JSON, not a GeoTIFF.\n\nTarget URL: ${url}\nHeader bytes: ${hex}\nASCII: "${ascii}"\n\nThe STAC asset is pointing to a metadata document. Choose a .tif/.tiff object path instead.`);
+            }
+
+            if (view[0] === 0x3C) {
+                const looksHtml = view[1] === 0x21 || view[1] === 0x68 || view[1] === 0x48; // <! / <h / <H
+                throw new Error(`${looksHtml ? "The server returned an HTML page" : "AWS returned an XML error document"} instead of a GeoTIFF.\n\nTarget URL: ${url}\nHeader bytes: ${hex}\nASCII: "${ascii}"\n\nThis usually means the URL points to an S3 directory viewer, AccessDenied XML, or a 404/redirect page rather than the binary raster object.`);
+            }
+
+            if (view[0] === 0x4E && view[1] === 0x49 && view[2] === 0x54 && view[3] === 0x46) {
+                throw new Error(`Fetched asset is an NITF/SICD/SIDD container, not a browser-renderable GeoTIFF.\n\nTarget URL: ${url}\nHeader bytes: ${hex}\nASCII: "${ascii}"\n\nUse QGIS/GDAL for this asset, or select an orthorectified .tif/.tiff GEC image.`);
+            }
+
+            const littleEndian = view[0] === 0x49 && view[1] === 0x49;
+            const bigEndian = view[0] === 0x4D && view[1] === 0x4D;
+            let version = null;
+
+            if (littleEndian) version = view[2] | (view[3] << 8);
+            if (bigEndian) version = (view[2] << 8) | view[3];
+
+            if ((littleEndian || bigEndian) && (version === 42 || version === 43)) {
+                return {
+                    tiffType: `${version === 43 ? "BigTIFF" : "Standard TIFF"} (${littleEndian ? "Little Endian" : "Big Endian"})`,
+                    hex,
+                    ascii
+                };
+            }
+
+            throw new Error(`Fetched asset is not a valid GeoTIFF.\n\nTarget URL: ${url}\nHeader bytes: ${hex}\nASCII: "${ascii}"\n\nExpected TIFF markers II*/MM* or BigTIFF markers II+/MM+. The link may be mislabeled in STAC or normalized to the wrong S3 object.`);
+        }
+
+        // Read only the first chunk of a response and cancel the stream; useful when a server ignores Range.
+        async function readProbeBytes(response, maxBytes = 16) {
+            if (!response.body || !response.body.getReader) {
+                const buf = await response.arrayBuffer();
+                return buf.slice(0, maxBytes);
+            }
+
+            const reader = response.body.getReader();
+            const result = await reader.read();
+            try { await reader.cancel(); } catch(e) {}
+            const chunk = result.value || new Uint8Array();
+            return chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + Math.min(chunk.byteLength, maxBytes));
+        }
+
+        // Low-cost preflight: inspect the remote object's first bytes before committing to a 50-150MB full download.
+        async function preflightGeoTiffUrl(url) {
+            const response = await fetch(url, {
+                method: 'GET',
+                headers: { 'Range': 'bytes=0-15' },
+                cache: 'no-store'
             });
 
-            // Init Leaflet Map with CartoDB Dark basemap default for deep space aesthetic
-            map = L.map('map', {
-                center: [20, 0],
-                zoom: 2,
-                zoomControl: false
-            });
-            L.control.zoom({ position: 'topleft' }).addTo(map);
+            if (!response.ok) {
+                if (response.status === 404) throw new Error(`404 Not Found: The STAC catalog references this object, but S3 does not have it.\n\nTarget: ${url}`);
+                if (response.status === 403) throw new Error(`403 Forbidden: S3 blocked access to this object.\n\nTarget: ${url}`);
+                throw new Error(`HTTP ${response.status}: Could not inspect the GeoTIFF header.\n\nTarget: ${url}`);
+            }
 
-            // Layer setups
-            osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                maxZoom: 19,
-                attribution: '&copy; OpenStreetMap contributors'
-            });
-            satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-                attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
-            });
-            darkLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-                subdomains: 'abcd',
-                maxZoom: 20
-            });
+            const probeBuffer = response.status === 206 ? await response.arrayBuffer() : await readProbeBytes(response, 16);
+            return validateGeoTiffMagic(probeBuffer, url);
+        }
 
-            // Set initial basemap
-            darkLayer.addTo(map);
+        // Full download with progress. Uses streams when available so the UI does not appear silently hung.
+        async function fetchArrayBufferWithProgress(url, onProgress) {
+            const response = await fetch(url, { cache: 'no-store' });
 
-            // Setup layer controls
-            const baseMaps = {
-                "OpenStreetMap Vector": osmLayer,
-                "Esri Imagery Satellite": satelliteLayer,
-                "CartoDB Dark Matter": darkLayer
-            };
-            L.control.layers(baseMaps, null, { position: 'topright' }).addTo(map);
+            if (!response.ok) {
+                if (response.status === 404) throw new Error(`404 Not Found: The STAC catalog references this asset, but the physical file does not exist on S3.\n\nTarget: ${url}`);
+                if (response.status === 403) throw new Error(`403 Forbidden: AWS blocked access to this file.\n\nTarget: ${url}`);
+                throw new Error(`HTTP ${response.status}: Failed to download raster.\n\nTarget: ${url}`);
+            }
 
-            // Setup footprint feature group
-            footprintGroup = L.featureGroup().addTo(map);
+            const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+            if (contentType.includes('json') || contentType.includes('html') || contentType.includes('xml')) {
+                console.warn("Suspicious content-type for raster:", contentType, url);
+            }
 
-            // Coordinate Tracker
-            map.on('mousemove', function(e) {
-                document.getElementById('coord-tracker').innerText = `${e.latlng.lat.toFixed(5)}°, ${e.latlng.lng.toFixed(5)}°`;
-            });
+            const total = parseInt(response.headers.get('content-length') || '0', 10);
+            if (!response.body || !response.body.getReader) {
+                const fallbackBuffer = await response.arrayBuffer();
+                if (onProgress) onProgress(fallbackBuffer.byteLength, fallbackBuffer.byteLength);
+                return fallbackBuffer;
+            }
 
-            // Setup Action Button Event Listeners
-            document.getElementById('load-catalog-btn').addEventListener('click', loadFromInput);
-            document.getElementById('start-crawl-btn').addEventListener('click', runCrawlProcess);
-            document.getElementById('stop-crawl-btn').addEventListener('click', cancelCrawl);
-            document.getElementById('btn-fit-bounds').addEventListener('click', fitMapToFootprints);
-            document.getElementById('btn-clear-layers').addEventListener('click', clearAllLoadedData);
-            document.getElementById('export-geojson-btn').addEventListener('click', exportGeoJSON);
-            document.getElementById('export-csv-btn').addEventListener('click', exportCSV);
-            document.getElementById('render-charts-btn').addEventListener('click', updateAnalyticsCharts);
+            const reader = response.body.getReader();
+            const chunks = [];
+            let received = 0;
 
-            // Filter listeners
-            document.getElementById('filter-search').addEventListener('input', applyFilters);
-            document.getElementById('filter-incidence').addEventListener('input', function() {
-                const val = parseInt(this.value);
-                document.getElementById('incidence-val-label').innerText = val === 0 ? "Any" : `>= ${val}°`;
-                applyFilters();
-            });
-            document.querySelectorAll('.polarization-filter').forEach(el => {
-                el.addEventListener('change', applyFilters);
-            });
-            document.getElementById('filter-platform').addEventListener('change', applyFilters);
-
-            // Image projection togglers
-            document.getElementById('overlay-map-toggle').addEventListener('change', toggleMapOverlay);
-            document.getElementById('overlay-opacity').addEventListener('input', function() {
-                document.getElementById('opacity-label').innerText = `${this.value}%`;
-                if (quicklookOverlayLayer) {
-                    quicklookOverlayLayer.setOpacity(this.value / 100);
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (value) {
+                    chunks.push(value);
+                    received += value.byteLength;
+                    if (onProgress) onProgress(received, total);
                 }
-                if (activeGeoRasterLayer) {
-                    activeGeoRasterLayer.setOpacity(this.value / 100);
+            }
+
+            const merged = new Uint8Array(received);
+            let offset = 0;
+            for (const chunk of chunks) {
+                merged.set(chunk, offset);
+                offset += chunk.byteLength;
+            }
+            return merged.buffer;
+        }
+
+        // Compute an adaptive SAR display stretch. Percentile + log stretch makes Umbra amplitude images visible instead of washed out.
+        function computeSarDisplayStretch(georaster) {
+            const noData = georaster.noDataValue;
+            const band = georaster.values && georaster.values[0];
+            const samples = [];
+            const maxSamples = 60000;
+
+            function maybePush(raw) {
+                const v = Number(raw);
+                if (!Number.isFinite(v)) return;
+                if (noData !== undefined && noData !== null && v === noData) return;
+                if (v <= 0) return; // SAR amplitude/power display is best treated as positive backscatter.
+                samples.push(Math.log10(Math.max(v, 1e-9)));
+            }
+
+            if (Array.isArray(band) && band.length > 0) {
+                const height = band.length;
+                const width = Array.isArray(band[0]) ? band[0].length : 0;
+                const rowStep = Math.max(1, Math.floor(height / Math.sqrt(maxSamples)));
+                const colStep = Math.max(1, Math.floor((width || height) / Math.sqrt(maxSamples)));
+
+                for (let y = 0; y < height; y += rowStep) {
+                    const row = band[y];
+                    if (Array.isArray(row)) {
+                        for (let x = 0; x < row.length; x += colStep) maybePush(row[x]);
+                    } else {
+                        maybePush(row);
+                    }
                 }
-            });
+            }
 
-            // Sidebar Tabs System
-            setupSidebarTabs();
+            if (samples.length < 32) {
+                const min = Number(georaster.mins?.[0]);
+                const max = Number(georaster.maxs?.[0]);
+                if (Number.isFinite(min) && Number.isFinite(max) && max > min) {
+                    return { low: min, high: max, logScale: false };
+                }
+                return { low: 0, high: 1, logScale: false };
+            }
 
-            // Load initial catalog
-            loadStacNode(activeCatalogUrl);
-        };
+            samples.sort((a, b) => a - b);
+            const q = p => samples[Math.min(samples.length - 1, Math.max(0, Math.floor(p * (samples.length - 1))))];
+            let low = q(0.02);
+            let high = q(0.985);
 
-        // Custom Safe Toast/Modal Notification replacement for standard alerts
+            if (!Number.isFinite(low) || !Number.isFinite(high) || high <= low) {
+                low = samples[0];
+                high = samples[samples.length - 1] || (low + 1);
+            }
+
+            return { low, high: high <= low ? low + 1 : high, logScale: true };
+        }
         function notify(title, message) {
             document.getElementById('modal-title').innerText = title;
             document.getElementById('modal-message').innerText = message;
@@ -1184,18 +1354,25 @@
         }
 
         // Dynamic Client-Side GeoTIFF/COG Streaming Engine using Main Thread ArrayBuffer
+        // Dynamic Client-Side GeoTIFF/COG Streaming Engine using strict URL preflight + main-thread ArrayBuffer parsing
         async function streamGeoTiffToMap(url, btnElement) {
-            
-            if (!url || !url.startsWith('http')) {
-                notify("Stream Error", "Cannot stream a missing or invalid relative URL. Please ensure STAC links are properly formatted.");
+            const parsedUrl = safeUrlObject(url);
+
+            if (!parsedUrl || !/^https?:$/i.test(parsedUrl.protocol)) {
+                notify("Stream Error", "Cannot stream a missing or invalid raster URL. The STAC asset must resolve to an absolute HTTPS .tif/.tiff object path.");
                 return;
             }
 
-            document.getElementById('status-text').innerText = "Downloading GeoTIFF (May take a moment)...";
-            
+            if (!hasStrictExtension(getAssetPathname(url), ['.tif', '.tiff'])) {
+                notify("Stream Error", `Blocked unsafe raster candidate before download.\n\nOnly object paths ending in .tif or .tiff are streamable in the browser.\n\nCandidate:\n${url}`);
+                return;
+            }
+
+            document.getElementById('status-text').innerText = "Inspecting GeoTIFF header...";
+
             // Show loading spinner on button
             const originalContent = btnElement.innerHTML;
-            btnElement.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-white"></i> Fetching Raster...`;
+            btnElement.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-white"></i> Inspecting Raster...`;
             lucide.createIcons();
             btnElement.disabled = true;
 
@@ -1203,85 +1380,46 @@
                 // Clear any existing georaster layer first
                 removeActiveGeoRaster();
 
-                // By fetching the array buffer on the main thread rather than passing the URL directly 
-                // to parseGeoraster, we completely bypass Web Worker CORS bugs and URL encoding crashes.
-                const response = await fetch(url);
-                
-                if (!response.ok) {
-                    if (response.status === 404) {
-                        throw new Error(`404 Not Found: The STAC catalog references this asset, but the physical file does not actually exist on the AWS S3 bucket.\n(Target: ${url})`);
-                    } else if (response.status === 403) {
-                        throw new Error(`403 Forbidden: AWS blocked access to this file.\n(Target: ${url})`);
-                    }
-                    throw new Error(`HTTP error! status: ${response.status} on ${url}`);
-                }
-                
-                const arrayBuffer = await response.arrayBuffer();
-
-                // CRITICAL SAFETY CHECK: Inspect magic bytes 
-                if (arrayBuffer.byteLength < 4) {
-                    throw new Error("S3 returned an empty file payload.");
-                }
-                
-                const firstBytes = new Uint8Array(arrayBuffer.slice(0, 4));
-                const hexBytes = Array.from(firstBytes).map(b => '0x' + b.toString(16).toUpperCase().padStart(2, '0')).join(', ');
-                const asciiBytes = Array.from(firstBytes).map(b => (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.').join('');
-
-                // Distinguish between JSON, HTML Webpages, and XML Errors based on the first bytes
-                if (firstBytes[0] === 0x7B) { // '{'
-                    throw new Error(`Fetched asset is a JSON text file, not a GeoTIFF!\n\nTarget URL: ${url}\nReceived ASCII: "${asciiBytes}"\n\nThis means the metadata link for this asset points to a JSON manifest document instead of an image raster.`);
-                }
-                if (firstBytes[0] === 0x3C) { // '<'
-                    if (firstBytes[1] === 0x21) { // '<!' e.g. <!DOCTYPE html>
-                        throw new Error(`The server returned an HTML webpage instead of a GeoTIFF image.\n\nTarget URL: ${url}\nReceived ASCII: "${asciiBytes}"\n\nThis means the catalog link points to a web viewer (like an S3 directory page) or the URL was invalid and your host returned a 404 page.`);
-                    } else { // '<?' e.g. <?xml
-                        throw new Error(`AWS S3 rejected the request and returned an XML error document.\n\nTarget URL: ${url}\nReceived ASCII: "${asciiBytes}"\n\nThis usually means 403 Access Denied or 404 Not Found on the bucket.`);
-                    }
+                // Preflight only the first bytes so bad STAC/S3 links fail instantly instead of downloading HTML/JSON/NITF.
+                let tiffInfo;
+                try {
+                    tiffInfo = await preflightGeoTiffUrl(url);
+                } catch (probeErr) {
+                    // If the probe itself is blocked by an intermediary, do not give up; the full fetch is still validated below.
+                    console.warn("GeoTIFF byte preflight failed; falling back to full fetch validation.", probeErr);
+                    document.getElementById('status-text').innerText = "Header probe blocked; downloading with full validation...";
                 }
 
-                // Robust check: supports Standard TIFF (42) and BigTIFF (43) for both Little and Big Endian formats
-                const isLittleEndian = firstBytes[0] === 0x49 && firstBytes[1] === 0x49;
-                const isBigEndian = firstBytes[0] === 0x4D && firstBytes[1] === 0x4D;
-                
-                let isTiffMagic = false;
-                let tiffType = "";
-                
-                if (isLittleEndian) {
-                    const version = firstBytes[2] | (firstBytes[3] << 8);
-                    if (version === 42) {
-                        isTiffMagic = true;
-                        tiffType = "Standard TIFF (Little Endian)";
-                    } else if (version === 43) {
-                        isTiffMagic = true;
-                        tiffType = "BigTIFF (Little Endian)";
-                    }
-                } else if (isBigEndian) {
-                    const version = (firstBytes[2] << 8) | firstBytes[3];
-                    if (version === 42) {
-                        isTiffMagic = true;
-                        tiffType = "Standard TIFF (Big Endian)";
-                    } else if (version === 43) {
-                        isTiffMagic = true;
-                        tiffType = "BigTIFF (Big Endian)";
-                    }
-                }
+                document.getElementById('status-text').innerText = "Downloading GeoTIFF stream...";
+                btnElement.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-white"></i> Downloading...`;
+                lucide.createIcons();
 
-                if (!isTiffMagic) {
-                    let errorDetail = `Fetched asset is not a valid GeoTIFF file.\nReceived ASCII: "${asciiBytes}"\n\n`;
-                    if (firstBytes[0] === 0x4E && firstBytes[1] === 0x49 && firstBytes[2] === 0x54 && firstBytes[3] === 0x46) {
-                        errorDetail += "The selected asset is a raw military NITF container (SICD/SIDD). In-browser Canvas engine only supports streaming Standard GeoTIFF formats. Please use QGIS to load raw NITFs directly.";
-                    } else {
-                        errorDetail += "Expected standard TIFF markers (II* / MM*) or BigTIFF markers (II+ / MM+). Ensure this is an orthorectified GeoTIFF image product.";
-                    }
-                    throw new Error(errorDetail);
-                }
+                // Main-thread fetch avoids georaster's worker URL parsing failure on encoded spaces.
+                const arrayBuffer = await fetchArrayBufferWithProgress(url, (received, total) => {
+                    const pct = total ? Math.min(100, Math.round((received / total) * 100)) : null;
+                    document.getElementById('status-text').innerText = pct !== null
+                        ? `Downloading GeoTIFF ${pct}% (${formatBytes(received)} / ${formatBytes(total)})`
+                        : `Downloading GeoTIFF (${formatBytes(received)})`;
+                });
+
+                // Validate again after full download because the server may have returned a different body than the probe.
+                tiffInfo = validateGeoTiffMagic(arrayBuffer, url) || tiffInfo;
 
                 document.getElementById('status-text').innerText = "Parsing spatial metadata...";
-                
+                btnElement.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-white"></i> Parsing...`;
+                lucide.createIcons();
+
+                // Let the browser paint the spinner/status before heavy client-side parsing starts.
+                await new Promise(resolve => requestAnimationFrame(resolve));
+
                 // Parse spatial reference systems and metadata using GeoRaster
                 const georaster = await parseGeoraster(arrayBuffer);
 
-                document.getElementById('status-text').innerText = "Projecting and normalising SAR pixels...";
+                document.getElementById('status-text').innerText = "Projecting and stretching SAR pixels...";
+                btnElement.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-white"></i> Rendering...`;
+                lucide.createIcons();
+
+                const stretch = computeSarDisplayStretch(georaster);
 
                 // Create a Leaflet Canvas Raster Layer on-the-fly reprojected to EPSG:3857/Web Mercator
                 activeGeoRasterLayer = new GeoRasterLayer({
@@ -1289,15 +1427,16 @@
                     opacity: document.getElementById('overlay-opacity').value / 100,
                     resolution: 128, // optimized grid size for browser performance
                     pixelValuesToColorFn: values => {
-                        const val = values[0]; // Single band SAR amplitude values
-                        if (isNaN(val) || val === georaster.noDataValue) return null; // Make background / margins transparent
+                        const val = Number(values[0]); // Single band SAR amplitude values
+                        if (!Number.isFinite(val) || val === georaster.noDataValue) return null; // Make background/margins transparent
 
-                        // Normalize dynamic range of radar backscatter pixels to grayscale (0 - 255)
-                        const min = georaster.mins[0];
-                        const max = georaster.maxs[0];
-                        const normalized = (val - min) / (max - min);
+                        // SAR-friendly adaptive display: log10 percentile stretch + light gamma correction.
+                        const displayValue = stretch.logScale ? Math.log10(Math.max(val, 1e-9)) : val;
+                        let normalized = (displayValue - stretch.low) / (stretch.high - stretch.low);
+                        normalized = Math.min(Math.max(normalized, 0), 1);
+                        normalized = Math.pow(normalized, 0.72);
                         const byteVal = Math.min(Math.max(Math.round(normalized * 255), 0), 255);
-                        
+
                         return `rgba(${byteVal}, ${byteVal}, ${byteVal}, 1)`;
                     }
                 });
@@ -1310,8 +1449,8 @@
 
                 // UI indicators
                 document.getElementById('raster-layer-status').classList.remove('hidden');
-                document.getElementById('status-text').innerText = `${tiffType} stream active`;
-                
+                document.getElementById('status-text').innerText = `${tiffInfo.tiffType} stream active`;
+
                 btnElement.innerHTML = `<i data-lucide="check-circle" class="w-4 h-4 text-emerald-300"></i> Stream Live`;
                 lucide.createIcons();
 
@@ -1324,7 +1463,7 @@
             } catch (err) {
                 console.error("GeoTIFF streaming failed: ", err);
                 document.getElementById('status-text').innerText = "Raster stream failed.";
-                
+
                 btnElement.innerHTML = `<i data-lucide="alert-circle" class="w-4 h-4 text-red-300"></i> Stream Error`;
                 lucide.createIcons();
 
@@ -1337,8 +1476,6 @@
                 }, 3000);
             }
         }
-
-        // Clean active GeoTIFF raster streams from the map
         function removeActiveGeoRaster() {
             if (activeGeoRasterLayer) {
                 map.removeLayer(activeGeoRasterLayer);
@@ -1387,51 +1524,15 @@
 
             if (item.assets && Object.keys(item.assets).length > 0) {
                 for (const [key, asset] of Object.entries(item.assets)) {
-                    const href = String(asset.href || "");
-                    const type = String(asset.type || "").toLowerCase();
-                    const lowerKey = String(key).toLowerCase();
-                    const absoluteUrl = translateS3Url(href, item.sourceUrl);
-                    
-                    // Evaluate path safely to avoid crashing on weird URLs
-                    let pathname = "";
-                    try {
-                        pathname = new URL(absoluteUrl).pathname.toLowerCase().trim();
-                    } catch (e) {
-                        pathname = String(absoluteUrl).toLowerCase().trim();
-                    }
-                    
-                    // Categorize the asset type safely
-                    const isJson = pathname.endsWith('.json') || type.includes('json') || lowerKey.includes('json') || lowerKey === 'gjd';
-                    const isNitf = pathname.endsWith('.nitf') || pathname.endsWith('.ntf') || type.includes('nitf') || lowerKey.includes('sicd') || lowerKey.includes('sidd');
-                    const isHtmlViewer = pathname.endsWith('.html') || absoluteUrl.includes('?prefix=');
-                    
-                    // Detect true GeoTIFF (Now completely safe from query params breaking it)
-                    const isGeoTiff = !isJson && !isNitf && !isHtmlViewer && (
-                        pathname.endsWith('.tif') || 
-                        pathname.endsWith('.tiff') || 
-                        lowerKey.includes('gec') || 
-                        lowerKey.includes('tif') || 
-                        type.includes('tiff') || 
-                        type.includes('geotiff')
-                    );
-                    
-                    if (isGeoTiff && !primaryGeoTiffUrl && absoluteUrl !== "") {
+                    const classification = classifyStacAsset(key, asset, item.sourceUrl);
+                    const absoluteUrl = classification.absoluteUrl;
+
+                    if (classification.isGeoTiff && !primaryGeoTiffUrl && absoluteUrl !== "") {
                         primaryGeoTiffUrl = absoluteUrl;
                         geoTiffItemTitle = asset.title || key;
                     }
-                    
-                    // Detect Quicklook/Thumbnail (must explicitly be a valid web image format)
-                    const isPreviewImage = !isJson && !isNitf && !isGeoTiff && !isHtmlViewer && (
-                        pathname.endsWith('.png') || 
-                        pathname.endsWith('.jpg') || 
-                        pathname.endsWith('.jpeg') || 
-                        type.includes('png') || 
-                        type.includes('jpeg') ||
-                        lowerKey.includes('preview') ||
-                        lowerKey.includes('thumbnail')
-                    );
-                    
-                    if (isPreviewImage && !quicklookUrl && absoluteUrl !== "") {
+
+                    if (classification.isPreviewImage && !quicklookUrl && absoluteUrl !== "") {
                         quicklookUrl = absoluteUrl;
                     }
                 }
@@ -1495,39 +1596,14 @@
                 Object.keys(item.assets).forEach(key => {
                     const asset = item.assets[key];
                     const type = String(asset.type || "").toLowerCase();
-                    const href = String(asset.href || "");
-                    const lowerKey = String(key).toLowerCase();
-                    
-                    const absoluteAssetUrl = translateS3Url(href, item.sourceUrl);
+                    const classification = classifyStacAsset(key, asset, item.sourceUrl);
+                    const absoluteAssetUrl = classification.absoluteUrl;
                     if (!absoluteAssetUrl) return; // skip missing urls
 
-                    // Safely extract extension
-                    let extension = ".bin";
-                    let pathname = "";
-                    try {
-                        const urlObj = new URL(absoluteAssetUrl);
-                        pathname = urlObj.pathname.toLowerCase().trim();
-                        const match = pathname.match(/\.[a-zA-Z0-9]+$/);
-                        if (match) {
-                            extension = match[0];
-                        }
-                    } catch (e) {
-                        pathname = String(absoluteAssetUrl).toLowerCase().trim();
-                    }
-
-                    // Categorize Asset
-                    const isJson = pathname.endsWith('.json') || type.includes('json') || lowerKey.includes('json') || lowerKey === 'gjd';
-                    const isNitf = pathname.endsWith('.nitf') || pathname.endsWith('.ntf') || type.includes('nitf') || lowerKey.includes('sicd') || lowerKey.includes('sidd');
-                    const isHtmlViewer = pathname.endsWith('.html') || absoluteAssetUrl.includes('?prefix=');
-                    
-                    const isGeoTiff = !isJson && !isNitf && !isHtmlViewer && (
-                        pathname.endsWith('.tif') || 
-                        pathname.endsWith('.tiff') || 
-                        lowerKey.includes('gec') || 
-                        lowerKey.includes('tif') || 
-                        type.includes('tiff') || 
-                        type.includes('geotiff')
-                    );
+                    const isGeoTiff = classification.isGeoTiff;
+                    const isJson = classification.isJson;
+                    const isNitf = classification.isNitf;
+                    const extension = classification.extension;
 
                     // Fetch custom descriptor and icon for GIS analysts
                     const info = getAssetFriendlyInfo(key, asset, isGeoTiff, isJson, isNitf);
@@ -1644,15 +1720,16 @@
 
             let imageUrl = "";
             if (selectedItem.assets) {
-                const keys = Object.keys(selectedItem.assets);
-                const bestKey = keys.find(k => k === 'rendered_preview') || 
-                                keys.find(k => k === 'thumbnail') || 
-                                keys.find(k => {
-                                    const t = (selectedItem.assets[k].type || "").toLowerCase();
-                                    return t === 'image/png' || t === 'image/jpeg' || t === 'image/jpg';
-                                });
-                if (bestKey) {
-                    imageUrl = translateS3Url(selectedItem.assets[bestKey].href, selectedItem.sourceUrl);
+                const previewCandidates = Object.entries(selectedItem.assets)
+                    .map(([key, asset]) => ({ key, asset, classification: classifyStacAsset(key, asset, selectedItem.sourceUrl) }))
+                    .filter(entry => entry.classification.isPreviewImage);
+
+                const preferredPreview = previewCandidates.find(entry => entry.key === 'rendered_preview') ||
+                                         previewCandidates.find(entry => entry.key === 'thumbnail') ||
+                                         previewCandidates[0];
+
+                if (preferredPreview) {
+                    imageUrl = preferredPreview.classification.absoluteUrl;
                 }
             }
 
