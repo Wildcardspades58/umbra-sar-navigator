@@ -72,7 +72,7 @@
             <div>
                 <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
                     Umbra SAR Navigator 
-                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.4</span>
+                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.5</span>
                     <span class="text-xs bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded font-normal">Analyst Tool</span>
                 </h1>
                 <p class="text-xs text-slate-400">Interactive OpenStreetMap client for Umbra Space SpatioTemporal Asset Catalogs</p>
@@ -1704,6 +1704,121 @@
                 .replace(/\s+/g, ' ');
         }
 
+
+        function isLikelyUmbraCollectFolderName(value) {
+            return /^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}[_-]UMBRA[-_]\d+/i.test(String(value || '')) ||
+                   /^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$/i.test(String(value || ''));
+        }
+
+        function isLikelyFileSegment(value) {
+            return /\.[a-z0-9]+(\.zip)?$/i.test(String(value || ''));
+        }
+
+        function getTaskPathSuffixVariants(pathSegments) {
+            const clean = (pathSegments || [])
+                .map(normalizeUmbraTaskFolderName)
+                .filter(Boolean)
+                .filter(seg => !/^stac$/i.test(seg))
+                .filter(seg => !/^catalog(?:\.json)?$/i.test(seg))
+                .filter(seg => !/^collection(?:\.json)?$/i.test(seg))
+                .filter(seg => !/^item(?:\.json)?$/i.test(seg));
+
+            const variants = [];
+            const add = arr => {
+                const joined = arr.map(normalizeUmbraTaskFolderName).filter(Boolean).join('/');
+                if (joined && !variants.some(v => v.toLowerCase() === joined.toLowerCase())) variants.push(joined);
+            };
+
+            // Preserve the full nested task path first. This fixes ad hoc paths like:
+            // sar-data/tasks/ad hoc/SooLocks_MI/<uuid>/<collect-folder>/...
+            add(clean);
+
+            // Also try suffixes because some STAC mirror trees have extra grouping folders above the S3 task path.
+            for (let start = 1; start < clean.length; start++) {
+                const suffix = clean.slice(start);
+                if (suffix.length <= 5) add(suffix);
+            }
+            return variants;
+        }
+
+        function extractDeliveryCandidatesFromS3Key(key, itemContext = null) {
+            const segments = getDecodedKeySegments(key);
+            const candidates = [];
+            if (segments.length === 0) return candidates;
+
+            const objectSegments = isLikelyFileSegment(segments[segments.length - 1]) ? segments.slice(0, -1) : segments.slice();
+            const collectIdx = objectSegments.findIndex(isLikelyUmbraCollectFolderName);
+            const uuidIdx = objectSegments.findIndex(seg => extractUuidValues(seg).length > 0);
+            const sarIdx = objectSegments.findIndex((seg, idx) => seg.toLowerCase() === 'sar-data' && (objectSegments[idx + 1] || '').toLowerCase() === 'tasks');
+            const stacIdx = objectSegments.findIndex(seg => seg.toLowerCase() === 'stac');
+
+            const addCandidate = (taskSegments, collectFolder, source, score) => {
+                if (!collectFolder || !isLikelyUmbraCollectFolderName(collectFolder)) return;
+                getTaskPathSuffixVariants(taskSegments).forEach((taskPath, idx) => {
+                    candidates.push({
+                        taskPath,
+                        collectFolder: normalizeUmbraTaskFolderName(collectFolder),
+                        source,
+                        score: score - idx
+                    });
+                });
+            };
+
+            if (sarIdx !== -1) {
+                const start = sarIdx + 2;
+                if (collectIdx > start) addCandidate(objectSegments.slice(start, collectIdx), objectSegments[collectIdx], 'direct-sar-data-key', 900);
+                else if (uuidIdx > start) {
+                    getUmbraCollectFolderVariantsForItem(itemContext || selectedItem || {}).forEach(folder => addCandidate(objectSegments.slice(start), folder, 'direct-sar-data-root-plus-derived-folder', 650));
+                }
+            }
+
+            if (stacIdx !== -1) {
+                const start = stacIdx + 1;
+                if (collectIdx > start) addCandidate(objectSegments.slice(start, collectIdx), objectSegments[collectIdx], 'stac-mirror-full-path', 850);
+                else if (uuidIdx > start) {
+                    // The STAC mirror may stop at the UUID/catalog level. Keep the full nested path to the UUID and add derived collect folders.
+                    getUmbraCollectFolderVariantsForItem(itemContext || selectedItem || {}).forEach(folder => addCandidate(objectSegments.slice(start, uuidIdx + 1), folder, 'stac-mirror-uuid-plus-derived-folder', 600));
+                }
+            }
+
+            // If no explicit stac segment exists, a path-style URL may still be the mirror path after the bucket name.
+            if (sarIdx === -1 && stacIdx === -1 && collectIdx > 0) {
+                addCandidate(objectSegments.slice(0, collectIdx), objectSegments[collectIdx], 'generic-key-full-path', 500);
+            }
+
+            return candidates;
+        }
+
+        function getExplicitUmbraDeliveryPrefixesFromItem(item) {
+            const { bucket, region } = getUmbraOpenDataBucketInfo();
+            const prefixMap = new Map();
+            const candidateKeys = getCandidateS3KeysForItem(item);
+            const collectFolders = getUmbraCollectFolderVariantsForItem(item);
+
+            candidateKeys.forEach(key => {
+                extractDeliveryCandidatesFromS3Key(key, item).forEach(candidate => {
+                    addPrefixToMap(prefixMap, bucket, region, `sar-data/tasks/${candidate.taskPath}/${candidate.collectFolder}/`, candidate.source, candidate.score);
+                });
+
+                // Extra fallback: if the STAC URL contains a UUID but no collect folder, combine its full nested path-to-UUID with the item timestamp.
+                const segments = getDecodedKeySegments(key);
+                const objectSegments = isLikelyFileSegment(segments[segments.length - 1]) ? segments.slice(0, -1) : segments;
+                const uuidIdx = objectSegments.findIndex(seg => extractUuidValues(seg).length > 0);
+                const stacIdx = objectSegments.findIndex(seg => seg.toLowerCase() === 'stac');
+                if (stacIdx !== -1 && uuidIdx > stacIdx) {
+                    getTaskPathSuffixVariants(objectSegments.slice(stacIdx + 1, uuidIdx + 1)).forEach((taskPath, idx) => {
+                        collectFolders.forEach(folder => {
+                            if (isLikelyUmbraCollectFolderName(folder)) {
+                                addPrefixToMap(prefixMap, bucket, region, `sar-data/tasks/${taskPath}/${folder}/`, 'stac-path-to-uuid-plus-derived-collect-folder', 575 - idx);
+                            }
+                        });
+                    });
+                }
+            });
+
+            return Array.from(prefixMap.values()).sort((a, b) => b.score - a.score || a.prefix.localeCompare(b.prefix)).slice(0, 36);
+        }
+
         function getUniqueValues(values) {
             const seen = new Set();
             return values
@@ -1923,7 +2038,12 @@
             const folders = getUmbraCollectFolderVariantsForItem(item);
             const prefixMap = new Map();
 
-            // First, exact STAC mirror conversion. This is the most reliable source because it preserves UUID and collect folder.
+            // First, exact STAC/data-path conversion. This preserves full nested task paths such as ad hoc/<target>/<uuid>/<collect>.
+            getExplicitUmbraDeliveryPrefixesFromItem(item).forEach(entry => {
+                addPrefixToMap(prefixMap, entry.bucket, entry.region, entry.prefix, entry.source, entry.score || 850);
+            });
+
+            // Then the older mirror conversion fallback.
             getMirroredSarDataPrefixesFromStacPaths(item).forEach(entry => {
                 addPrefixToMap(prefixMap, entry.bucket, entry.region, entry.prefix, entry.source, entry.score || 450);
             });
@@ -1951,11 +2071,20 @@
             const targets = getUmbraTargetFolderNamesForItem(item);
             const uuids = getUmbraUuidVariantsForItem(item);
 
+            getExplicitUmbraDeliveryPrefixesFromItem(item).forEach(entry => {
+                const parts = entry.prefix.replace(/\/$/, '').split('/');
+                // Drop the collect folder, leaving sar-data/tasks/<full task path>/<uuid or target>/.
+                if (parts.length > 3) {
+                    const rootPrefix = parts.slice(0, -1).join('/') + '/';
+                    addPrefixToMap(prefixMap, entry.bucket, entry.region, rootPrefix, 'explicit-prefix-parent-root', (entry.score || 500) - 50);
+                }
+            });
+
             targets.forEach(target => {
                 uuids.forEach(uuid => addPrefixToMap(prefixMap, bucket, region, `sar-data/tasks/${target}/${uuid}/`, 'derived-target-uuid-root', 300));
                 addPrefixToMap(prefixMap, bucket, region, `sar-data/tasks/${target}/`, 'derived-task-root', 100);
             });
-            return Array.from(prefixMap.values()).sort((a, b) => b.score - a.score).slice(0, 24);
+            return Array.from(prefixMap.values()).sort((a, b) => b.score - a.score).slice(0, 36);
         }
 
         function getPredictedUmbraDeliverableObjectsForItem(item) {
@@ -2044,9 +2173,18 @@
 
         async function fetchS3ListXml(bucket, region, params) {
             const listUrl = `https://${bucket}.s3.${region || 'us-west-2'}.amazonaws.com/?${params.toString()}`;
-            const response = await fetch(listUrl, { cache: 'no-store' });
-            if (!response.ok) throw new Error(`S3 list failed with HTTP ${response.status}`);
-            return await response.text();
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 8000);
+            try {
+                const response = await fetch(listUrl, { cache: 'no-store', signal: controller.signal });
+                if (!response.ok) throw new Error(`S3 list failed with HTTP ${response.status}`);
+                return await response.text();
+            } catch (err) {
+                if (err.name === 'AbortError') throw new Error(`S3 list timed out for ${params.get('prefix') || 'bucket root'}`);
+                throw err;
+            } finally {
+                clearTimeout(timeoutId);
+            }
         }
 
         async function listS3CommonPrefixes(bucket, region, prefix) {
@@ -2097,14 +2235,24 @@
             return key;
         }
 
+        async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+            try {
+                return await fetch(url, { ...options, signal: controller.signal });
+            } finally {
+                clearTimeout(timeoutId);
+            }
+        }
+
         async function probeS3Object(url) {
             try {
-                let response = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+                let response = await fetchWithTimeout(url, { method: 'HEAD', cache: 'no-store' }, 6000);
                 if (response.ok) {
                     return { exists: true, size: parseInt(response.headers.get('content-length') || '0', 10) || 0 };
                 }
-                if (response.status === 405 || response.status === 403) {
-                    response = await fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
+                if (response.status === 405 || response.status === 403 || response.status === 0) {
+                    response = await fetchWithTimeout(url, { headers: { Range: 'bytes=0-0' }, cache: 'no-store' }, 6000);
                     if (response.ok || response.status === 206) {
                         const contentRange = response.headers.get('content-range') || '';
                         const match = contentRange.match(/\/(\d+)$/);
@@ -2139,8 +2287,9 @@
                 title: `${productLabel} — ${classification.fileName}`,
                 type: guessMimeTypeFromProduct(classification.productCode, classification.extension),
                 roles: classification.isStreamableCog ? ['data', 'visual', 'cog'] : ['data'],
-                description: `Discovered from ${sourceLabel} for this selected Umbra image${obj.size ? ` (${formatBytes(obj.size)})` : ''}.`,
+                description: `${obj.unverified ? 'Predicted from Umbra delivery naming convention' : `Discovered from ${sourceLabel}`} for this selected Umbra image${obj.size ? ` (${formatBytes(obj.size)})` : ''}.`,
                 _discoveredFromS3: true,
+                _unverifiedPredicted: !!obj.unverified,
                 _sizeBytes: obj.size || 0,
                 _s3Prefix: obj.key ? obj.key.split('/').slice(0, -1).join('/') + '/' : ''
             };
@@ -2214,9 +2363,11 @@
                 .slice(0, 16);
         }
 
-        async function addPredictedUmbraDeliverables(item) {
+        async function addPredictedUmbraDeliverables(item, options = {}) {
             const predicted = getPredictedUmbraDeliverableObjectsForItem(item);
             let added = 0;
+            const allowUnverified = !!options.allowUnverified;
+            const onlyGecIfUnverified = !!options.onlyGecIfUnverified;
             predicted.sort((a, b) => {
                 const aGec = /_GEC\.tif$/i.test(a.key) ? 0 : 1;
                 const bGec = /_GEC\.tif$/i.test(b.key) ? 0 : 1;
@@ -2225,8 +2376,18 @@
 
             for (const obj of predicted) {
                 const probe = await probeS3Object(obj.url);
-                if (!probe.exists) continue;
-                if (addS3ObjectToItemAssets(item, { ...obj, size: probe.size }, 'Umbra naming-convention fallback')) added++;
+                if (probe.exists) {
+                    if (addS3ObjectToItemAssets(item, { ...obj, size: probe.size }, 'Umbra naming-convention fallback')) added++;
+                    continue;
+                }
+
+                // Browser CORS often prevents HEAD/list checks even when the object itself can be streamed.
+                // For high-confidence STAC-derived collect folders, still show the predicted GEC/standard deliverables.
+                if (allowUnverified) {
+                    if (onlyGecIfUnverified && !/_GEC\.tif$/i.test(obj.key)) continue;
+                    if (!/_GEC\.tif$|_CSI\.tif$|_SIDD\.nitf$|_SICD\.nitf$|_CPHD\.cphd$|_METADATA\.json$/i.test(obj.key)) continue;
+                    if (addS3ObjectToItemAssets(item, { ...obj, size: 0, unverified: true }, 'Umbra naming-convention fallback')) added++;
+                }
             }
             return added;
         }
@@ -2261,7 +2422,7 @@
 
             if (!hasGec()) {
                 try {
-                    added += await addPredictedUmbraDeliverables(item);
+                    added += await addPredictedUmbraDeliverables(item, { allowUnverified: true, onlyGecIfUnverified: false });
                 } catch (e) {
                     console.warn('Umbra predicted deliverable fallback failed:', e);
                 }
@@ -2412,7 +2573,7 @@
                 const safeKey = escapeHtml(key);
                 const safeExt = escapeHtml(classification.extension);
                 const safeFilename = escapeHtml(`${item.id || 'collect'}_${key}`);
-                const sourceBadge = asset._discoveredFromS3 ? 'S3' : 'STAC';
+                const sourceBadge = asset._unverifiedPredicted ? 'PREDICTED' : (asset._discoveredFromS3 ? 'S3' : 'STAC');
                 const sizeBadge = asset._sizeBytes ? `<span class="text-[9px] bg-slate-900 text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded uppercase font-mono">${escapeHtml(formatBytes(asset._sizeBytes))}</span>` : '';
                 const streamButton = classification.isStreamableCog ? `
                     <button class="stream-raster-btn px-2 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded border border-indigo-400 text-white transition-all shadow-sm flex items-center gap-1"
@@ -2748,13 +2909,14 @@
                 if (selectedItem && selectedItem.id === item.id) {
                     configurePrimaryStreamButton(item);
                     renderAvailableDeliverables(item, added > 0
-                        ? `Added ${added} AWS object${added === 1 ? '' : 's'} from the selected image delivery folder / naming fallback.`
-                        : "Checked exact STAC→sar-data mirrored folders, target/UUID collect folders, and predicted Umbra GEC/SICD/SIDD/CPHD object names. No additional AWS objects were exposed for this collect.");
+                        ? `Added ${added} deliverable object${added === 1 ? '' : 's'} from the selected image delivery folder, S3 listing, or Umbra naming fallback. Predicted rows are validated when Stream/Download is clicked.`
+                        : "Checked STAC paths, nested sar-data/tasks folders, and Umbra GEC/SICD/SIDD/CPHD naming fallbacks. No additional objects could be exposed for this collect.");
                 }
             }).catch(err => {
                 console.warn('S3 reconciliation failed:', err);
                 if (selectedItem && selectedItem.id === item.id) {
-                    renderAvailableDeliverables(item, "Showing STAC-listed deliverables. S3 sibling discovery was blocked or unavailable.");
+                    configurePrimaryStreamButton(item);
+                    renderAvailableDeliverables(item, "Showing STAC-listed / predicted deliverables. S3 sibling discovery was blocked or unavailable.");
                 }
             });
 
