@@ -72,7 +72,7 @@
             <div>
                 <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
                     Umbra SAR Navigator 
-                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.0</span>
+                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.1</span>
                     <span class="text-xs bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded font-normal">Analyst Tool</span>
                 </h1>
                 <p class="text-xs text-slate-400">Interactive OpenStreetMap client for Umbra Space SpatioTemporal Asset Catalogs</p>
@@ -166,6 +166,23 @@
                             <button id="stop-crawl-btn" disabled class="bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-400 font-semibold text-xs py-2 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-all">
                                 <i data-lucide="square" class="w-3.5 h-3.5"></i> Stop
                             </button>
+                        </div>
+                    </div>
+
+                    <!-- Reference URLs / Data Source Diagnostics -->
+                    <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-3">
+                        <div class="flex justify-between items-center">
+                            <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Reference URLs</h3>
+                            <button id="copy-reference-urls-btn" class="text-[10px] bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 px-2 py-1 rounded flex items-center gap-1 transition-all">
+                                <i data-lucide="copy" class="w-3 h-3"></i> Copy All
+                            </button>
+                        </div>
+                        <p class="text-[11px] text-slate-500 leading-relaxed">
+                            Stored reference endpoints for debugging STAC traversal, AWS bucket routing, and COG streaming.
+                            Use the direct S3 REST catalog URL for app loading; use the website URL only as a human bucket browser.
+                        </p>
+                        <div id="reference-urls-list" class="space-y-2 text-[10px] font-mono">
+                            <!-- Populated at runtime -->
                         </div>
                     </div>
 
@@ -496,6 +513,41 @@
         let polarizationChartInstance = null;
         let platformChartInstance = null;
 
+        // Reference endpoints retained inside the application for diagnostics and user copy/paste workflows.
+        const REFERENCE_URLS = [
+            {
+                label: "Direct STAC Catalog JSON",
+                role: "App loader / machine-readable STAC root",
+                url: "https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/stac/catalog.json"
+            },
+            {
+                label: "Radiant Earth STAC Browser",
+                role: "Human STAC preview UI",
+                url: "https://radiantearth.github.io/stac-browser/#/external/s3.us-west-2.amazonaws.com/umbra-open-data-catalog/stac/catalog.json"
+            },
+            {
+                label: "AWS Registry Entry",
+                role: "Dataset description, region, citation, and bucket details",
+                url: "https://registry.opendata.aws/umbra-open-data/"
+            },
+            {
+                label: "S3 Website Bucket Browser",
+                role: "Human bucket browsing only; not for binary COG fetches",
+                url: "http://umbra-open-data-catalog.s3-website.us-west-2.amazonaws.com/"
+            },
+            {
+                label: "S3 REST Bucket Endpoint",
+                role: "Direct AWS object/API endpoint used by the app",
+                url: "https://umbra-open-data-catalog.s3.us-west-2.amazonaws.com/"
+            }
+        ];
+
+        function refreshIcons() {
+            if (window.lucide && typeof window.lucide.createIcons === 'function') {
+                window.refreshIcons();
+            }
+        }
+
         // General URL Translator (converts s3:// paths and website endpoints to direct virtual-hosted AWS endpoints)
         // General URL Translator (converts s3:// paths, path-style AWS URLs, and S3 website endpoints to direct object API endpoints)
         function translateS3Url(rawHref, sourceUrl) {
@@ -559,6 +611,29 @@
                 // Final fallback keeps the app usable for unusual STAC hrefs while still enforcing HTTPS.
                 return urlStr.replace(/^http:\/\//i, 'https://');
             }
+        }
+
+        // Accept user-friendly reference URLs in the top input and convert them to machine-readable STAC JSON endpoints.
+        function normalizeCatalogInputUrl(inputValue) {
+            let value = String(inputValue || '').trim();
+            if (!value) return '';
+
+            // Radiant Earth STAC Browser external links are UI wrappers around the actual catalog URL.
+            // Example: https://radiantearth.github.io/stac-browser/#/external/s3.us-west-2.amazonaws.com/.../catalog.json
+            const radiantExternalMarker = '#/external/';
+            const radiantIdx = value.indexOf(radiantExternalMarker);
+            if (radiantIdx !== -1) {
+                const externalTarget = value.substring(radiantIdx + radiantExternalMarker.length);
+                value = /^https?:\/\//i.test(externalTarget) ? externalTarget : `https://${externalTarget}`;
+            }
+
+            // The human S3 website bucket browser should not be used for JSON/binary fetches.
+            // If a user pastes the bucket root, send the app to the actual STAC root object.
+            if (/^https?:\/\/umbra-open-data-catalog\.s3-website[.-]us-west-2\.amazonaws\.com\/?$/i.test(value)) {
+                return activeCatalogUrl;
+            }
+
+            return translateS3Url(value, activeCatalogUrl);
         }
 
         // Safely parse a URL; returns null for malformed hrefs without throwing into the UI event loop.
@@ -882,6 +957,180 @@
 
             return { low, high: high <= low ? low + 1 : high, logScale: true };
         }
+        function renderReferenceUrls() {
+            const container = document.getElementById('reference-urls-list');
+            if (!container) return;
+
+            container.innerHTML = REFERENCE_URLS.map(ref => `
+                <div class="bg-slate-900/60 border border-slate-800 rounded-lg p-2 space-y-1">
+                    <div class="flex items-center justify-between gap-2">
+                        <span class="text-slate-300 font-semibold font-sans">${escapeHtml(ref.label)}</span>
+                        <button class="copy-single-reference-url p-1 rounded bg-slate-950 hover:bg-slate-800 border border-slate-700 text-slate-400 hover:text-white"
+                                data-url="${escapeHtml(ref.url)}" title="Copy this reference URL">
+                            <i data-lucide="copy" class="w-3 h-3"></i>
+                        </button>
+                    </div>
+                    <div class="text-slate-500 font-sans">${escapeHtml(ref.role)}</div>
+                    <a href="${escapeHtml(ref.url)}" target="_blank" rel="noopener noreferrer" class="block text-indigo-300 hover:text-indigo-200 truncate underline decoration-indigo-500/30" title="${escapeHtml(ref.url)}">${escapeHtml(ref.url)}</a>
+                </div>
+            `).join('');
+
+            container.querySelectorAll('.copy-single-reference-url').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    await copyTextToClipboard(btn.getAttribute('data-url') || '');
+                    btn.innerHTML = `<i data-lucide="check" class="w-3 h-3 text-emerald-400"></i>`;
+                    refreshIcons();
+                    setTimeout(() => {
+                        btn.innerHTML = `<i data-lucide="copy" class="w-3 h-3"></i>`;
+                        refreshIcons();
+                    }, 1200);
+                });
+            });
+
+            const copyAllBtn = document.getElementById('copy-reference-urls-btn');
+            if (copyAllBtn) {
+                copyAllBtn.addEventListener('click', async () => {
+                    const payload = REFERENCE_URLS.map(ref => `${ref.label}: ${ref.url}`).join('\n');
+                    await copyTextToClipboard(payload);
+                    copyAllBtn.innerHTML = `<i data-lucide="check" class="w-3 h-3 text-emerald-400"></i> Copied`;
+                    refreshIcons();
+                    setTimeout(() => {
+                        copyAllBtn.innerHTML = `<i data-lucide="copy" class="w-3 h-3"></i> Copy All`;
+                        refreshIcons();
+                    }, 1500);
+                }, { once: true });
+            }
+
+            refreshIcons();
+        }
+
+        async function copyTextToClipboard(text) {
+            try {
+                if (navigator.clipboard?.writeText) {
+                    await navigator.clipboard.writeText(text);
+                    return true;
+                }
+            } catch (err) {
+                console.warn('Navigator clipboard unavailable; falling back to textarea copy.', err);
+            }
+
+            const el = document.createElement('textarea');
+            el.value = text;
+            el.setAttribute('readonly', '');
+            el.style.position = 'absolute';
+            el.style.left = '-9999px';
+            document.body.appendChild(el);
+            el.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(el);
+            return ok;
+        }
+
+        function initializeApplication() {
+            // Detect if running locally on file:// protocol
+            if (window.location.protocol === 'file:') {
+                document.getElementById('local-protocol-warning')?.classList.remove('hidden');
+            }
+
+            refreshIcons();
+            renderReferenceUrls();
+
+            // Setup Custom Modal Handlers
+            document.getElementById('modal-close-btn')?.addEventListener('click', () => {
+                document.getElementById('modal-container')?.classList.add('hidden');
+            });
+
+            if (!window.L || typeof L.map !== 'function') {
+                const tree = document.getElementById('stac-tree-list');
+                if (tree) {
+                    tree.innerHTML = `
+                        <div class="p-6 text-center text-red-400">
+                            <i data-lucide="x-circle" class="w-6 h-6 mx-auto mb-2"></i>
+                            <p class="text-xs">Leaflet failed to load, so the map cannot initialize. Check CDN/network access.</p>
+                        </div>`;
+                    refreshIcons();
+                }
+                document.getElementById('status-text').innerText = "Map library failed to load";
+                return;
+            }
+
+            // Init Leaflet Map with CartoDB Dark basemap default for deep space aesthetic
+            map = L.map('map', {
+                center: [20, 0],
+                zoom: 2,
+                zoomControl: false
+            });
+            L.control.zoom({ position: 'topleft' }).addTo(map);
+
+            // Layer setups
+            osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '&copy; OpenStreetMap contributors'
+            });
+            satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+            });
+            darkLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+                subdomains: 'abcd',
+                maxZoom: 20
+            });
+
+            darkLayer.addTo(map);
+
+            const baseMaps = {
+                "OpenStreetMap Vector": osmLayer,
+                "Esri Imagery Satellite": satelliteLayer,
+                "CartoDB Dark Matter": darkLayer
+            };
+            L.control.layers(baseMaps, null, { position: 'topright' }).addTo(map);
+
+            footprintGroup = L.featureGroup().addTo(map);
+
+            map.on('mousemove', function(e) {
+                document.getElementById('coord-tracker').innerText = `${e.latlng.lat.toFixed(5)}°, ${e.latlng.lng.toFixed(5)}°`;
+            });
+
+            document.getElementById('load-catalog-btn').addEventListener('click', loadFromInput);
+            document.getElementById('start-crawl-btn').addEventListener('click', runCrawlProcess);
+            document.getElementById('stop-crawl-btn').addEventListener('click', cancelCrawl);
+            document.getElementById('btn-fit-bounds').addEventListener('click', fitMapToFootprints);
+            document.getElementById('btn-clear-layers').addEventListener('click', clearAllLoadedData);
+            document.getElementById('export-geojson-btn').addEventListener('click', exportGeoJSON);
+            document.getElementById('export-csv-btn').addEventListener('click', exportCSV);
+            document.getElementById('render-charts-btn').addEventListener('click', updateAnalyticsCharts);
+
+            document.getElementById('filter-search').addEventListener('input', applyFilters);
+            document.getElementById('filter-incidence').addEventListener('input', function() {
+                const val = parseInt(this.value);
+                document.getElementById('incidence-val-label').innerText = val === 0 ? "Any" : `>= ${val}°`;
+                applyFilters();
+            });
+            document.querySelectorAll('.polarization-filter').forEach(el => {
+                el.addEventListener('change', applyFilters);
+            });
+            document.getElementById('filter-platform').addEventListener('change', applyFilters);
+
+            document.getElementById('overlay-map-toggle').addEventListener('change', toggleMapOverlay);
+            document.getElementById('overlay-opacity').addEventListener('input', function() {
+                document.getElementById('opacity-label').innerText = `${this.value}%`;
+                if (quicklookOverlayLayer) quicklookOverlayLayer.setOpacity(this.value / 100);
+                if (activeGeoRasterLayer) activeGeoRasterLayer.setOpacity(this.value / 100);
+            });
+
+            setupSidebarTabs();
+            setTimeout(() => map.invalidateSize(), 250);
+
+            // Load initial catalog. This restores the app boot path that was accidentally lost in the v1.3 deliverables patch.
+            loadStacNode(activeCatalogUrl);
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initializeApplication);
+        } else {
+            initializeApplication();
+        }
+
         function notify(title, message) {
             document.getElementById('modal-title').innerText = title;
             document.getElementById('modal-message').innerText = message;
@@ -912,9 +1161,10 @@
 
         // Trigger loading node from top URL bar
         function loadFromInput() {
-            const inputVal = document.getElementById('catalog-url-input').value.trim();
+            const inputVal = normalizeCatalogInputUrl(document.getElementById('catalog-url-input').value);
             if (inputVal) {
                 activeCatalogUrl = inputVal;
+                document.getElementById('catalog-url-input').value = inputVal;
                 breadcrumbsHistory = [];
                 loadStacNode(activeCatalogUrl);
             }
@@ -929,7 +1179,7 @@
                     <p class="text-xs">Fetching metadata from server...</p>
                 </div>
             `;
-            lucide.createIcons();
+            refreshIcons();
 
             try {
                 const data = await fetchWithRetryAndExponentialBackoff(url);
@@ -943,7 +1193,7 @@
                         <p class="text-xs">Failed to load STAC Node: ${err.message}</p>
                     </div>
                 `;
-                lucide.createIcons();
+                refreshIcons();
                 notify("S3 Connection/CORS Error", `The requested resource at "${url}" could not be accessed. Ensure it allows CORS permissions, or try a valid public STAC endpoint.`);
             }
         }
@@ -1030,7 +1280,7 @@
                 treeContainer.appendChild(card);
             });
 
-            lucide.createIcons();
+            refreshIcons();
         }
 
         // Render dynamic breadcrumbs
@@ -1061,7 +1311,7 @@
                 }
             });
 
-            lucide.createIcons();
+            refreshIcons();
         }
 
         // Fetch and load a single STAC item directly
@@ -1303,7 +1553,7 @@
                 listContainer.appendChild(itemRow);
             });
 
-            lucide.createIcons();
+            refreshIcons();
         }
 
         // Helper mapper to explain SAR format structures clearly in details list.
@@ -1569,10 +1819,10 @@
                         console.warn('Clipboard copy failed:', err);
                         btn.innerHTML = `<i data-lucide="alert-circle" class="w-3.5 h-3.5 text-amber-400"></i>`;
                     }
-                    lucide.createIcons();
+                    refreshIcons();
                     setTimeout(() => {
                         btn.innerHTML = `<i data-lucide="copy" class="w-3.5 h-3.5"></i>`;
-                        lucide.createIcons();
+                        refreshIcons();
                     }, 1500);
                 });
             });
@@ -1612,7 +1862,7 @@
             newPrimaryBtn.addEventListener('click', () => {
                 streamGeoTiffToMap(preferred.classification.absoluteUrl, newPrimaryBtn);
             });
-            lucide.createIcons();
+            refreshIcons();
         }
 
         function renderAvailableDeliverables(item, statusMessage = '') {
@@ -1625,7 +1875,7 @@
                     <div class="p-3 bg-slate-900/60 border border-slate-800 rounded-lg text-xs text-slate-500">
                         No deliverable assets were listed in this STAC Item yet.${statusMessage ? `<br>${escapeHtml(statusMessage)}` : ''}
                     </div>`;
-                lucide.createIcons();
+                refreshIcons();
                 return;
             }
 
@@ -1693,7 +1943,7 @@
             });
 
             wireDeliverableActionButtons(assetsContainer);
-            lucide.createIcons();
+            refreshIcons();
         }
 
         // Intercept click on NITF or TIFF files to bypass misconfigured S3 download headers
@@ -1703,7 +1953,7 @@
             // Show loading spinner on button
             const originalContent = btnElement.innerHTML;
             btnElement.innerHTML = `<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin text-indigo-400"></i>`;
-            lucide.createIcons();
+            refreshIcons();
             btnElement.disabled = true;
 
             try {
@@ -1738,11 +1988,11 @@
                 
                 document.getElementById('status-text').innerText = "Download triggered successfully!";
                 btnElement.innerHTML = `<i data-lucide="check-circle" class="w-3.5 h-3.5 text-emerald-400"></i>`;
-                lucide.createIcons();
+                refreshIcons();
                 
                 setTimeout(() => {
                     btnElement.innerHTML = originalContent;
-                    lucide.createIcons();
+                    refreshIcons();
                     btnElement.disabled = false;
                 }, 2000);
 
@@ -1754,7 +2004,7 @@
                 window.open(url, '_blank');
                 
                 btnElement.innerHTML = `<i data-lucide="alert-circle" class="w-3.5 h-3.5 text-amber-500"></i>`;
-                lucide.createIcons();
+                refreshIcons();
                 
                 notify("Direct Binary Fetch Blocked", 
                     `${err.message}\n\n` +
@@ -1764,7 +2014,7 @@
 
                 setTimeout(() => {
                     btnElement.innerHTML = originalContent;
-                    lucide.createIcons();
+                    refreshIcons();
                     btnElement.disabled = false;
                 }, 3000);
             }
@@ -1790,7 +2040,7 @@
             // Show loading spinner on button
             const originalContent = btnElement.innerHTML;
             btnElement.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-white"></i> Inspecting Raster...`;
-            lucide.createIcons();
+            refreshIcons();
             btnElement.disabled = true;
 
             try {
@@ -1809,7 +2059,7 @@
 
                 document.getElementById('status-text').innerText = "Downloading GeoTIFF stream...";
                 btnElement.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-white"></i> Downloading...`;
-                lucide.createIcons();
+                refreshIcons();
 
                 // Main-thread fetch avoids georaster's worker URL parsing failure on encoded spaces.
                 const arrayBuffer = await fetchArrayBufferWithProgress(url, (received, total) => {
@@ -1824,7 +2074,7 @@
 
                 document.getElementById('status-text').innerText = "Parsing spatial metadata...";
                 btnElement.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-white"></i> Parsing...`;
-                lucide.createIcons();
+                refreshIcons();
 
                 // Let the browser paint the spinner/status before heavy client-side parsing starts.
                 await new Promise(resolve => requestAnimationFrame(resolve));
@@ -1834,7 +2084,7 @@
 
                 document.getElementById('status-text').innerText = "Projecting and stretching SAR pixels...";
                 btnElement.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-white"></i> Rendering...`;
-                lucide.createIcons();
+                refreshIcons();
 
                 const stretch = computeSarDisplayStretch(georaster);
 
@@ -1869,11 +2119,11 @@
                 document.getElementById('status-text').innerText = `${tiffInfo.tiffType} stream active`;
 
                 btnElement.innerHTML = `<i data-lucide="check-circle" class="w-4 h-4 text-emerald-300"></i> Stream Live`;
-                lucide.createIcons();
+                refreshIcons();
 
                 setTimeout(() => {
                     btnElement.innerHTML = originalContent;
-                    lucide.createIcons();
+                    refreshIcons();
                     btnElement.disabled = false;
                 }, 2000);
 
@@ -1882,13 +2132,13 @@
                 document.getElementById('status-text').innerText = "Raster stream failed.";
 
                 btnElement.innerHTML = `<i data-lucide="alert-circle" class="w-4 h-4 text-red-300"></i> Stream Error`;
-                lucide.createIcons();
+                refreshIcons();
 
                 notify("GeoTIFF Streaming Interrupted", err.message);
 
                 setTimeout(() => {
                     btnElement.innerHTML = originalContent;
-                    lucide.createIcons();
+                    refreshIcons();
                     btnElement.disabled = false;
                 }, 3000);
             }
