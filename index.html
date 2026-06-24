@@ -72,7 +72,7 @@
             <div>
                 <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
                     Umbra SAR Navigator 
-                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.8</span>
+                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.9</span>
                     <span class="text-xs bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded font-normal">Analyst Tool</span>
                 </h1>
                 <p class="text-xs text-slate-400">Interactive OpenStreetMap client for Umbra Space SpatioTemporal Asset Catalogs</p>
@@ -262,6 +262,95 @@
                         </div>
                     </div>
 
+                    <!-- Geographic Analytics Dashboard -->
+                    <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-4">
+                        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                            <div>
+                                <h3 class="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                                    <i data-lucide="globe-2" class="w-3.5 h-3.5"></i> Geographic Analytics
+                                </h3>
+                                <p id="geo-analytics-note" class="text-[10px] text-slate-500 mt-1 leading-relaxed">
+                                    Geography is inferred from target metadata first, then footprint centroids as a fallback. Country/state counts update with active filters.
+                                </p>
+                            </div>
+                            <button id="export-geo-analytics-btn" class="text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-1 border border-emerald-900/40 bg-emerald-950/20 rounded px-2 py-1 transition-all">
+                                <i data-lucide="file-spreadsheet" class="w-3 h-3"></i> Export Geo CSV
+                            </button>
+                        </div>
+
+                        <div class="grid grid-cols-2 lg:grid-cols-4 gap-2 text-xs">
+                            <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                                <span class="text-slate-500 text-[10px] block font-semibold">Active Collects</span>
+                                <span id="geo-total-collects" class="font-bold text-emerald-300 font-mono text-lg">0</span>
+                            </div>
+                            <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                                <span class="text-slate-500 text-[10px] block font-semibold">Countries</span>
+                                <span id="geo-country-count" class="font-bold text-emerald-300 font-mono text-lg">0</span>
+                            </div>
+                            <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                                <span class="text-slate-500 text-[10px] block font-semibold">States / Regions</span>
+                                <span id="geo-state-count" class="font-bold text-emerald-300 font-mono text-lg">0</span>
+                            </div>
+                            <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                                <span class="text-slate-500 text-[10px] block font-semibold">Unresolved</span>
+                                <span id="geo-unresolved-count" class="font-bold text-amber-300 font-mono text-lg">0</span>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 text-xs">
+                            <div class="bg-slate-900/50 rounded-lg p-3 border border-slate-800/50">
+                                <span class="block text-[10px] text-slate-500 font-semibold uppercase mb-1">Top Country</span>
+                                <span id="geo-top-country" class="block text-slate-200 font-semibold truncate">No data loaded</span>
+                            </div>
+                            <div class="bg-slate-900/50 rounded-lg p-3 border border-slate-800/50">
+                                <span class="block text-[10px] text-slate-500 font-semibold uppercase mb-1">Top State / Region</span>
+                                <span id="geo-top-region" class="block text-slate-200 font-semibold truncate">No data loaded</span>
+                            </div>
+                            <div class="bg-slate-900/50 rounded-lg p-3 border border-slate-800/50">
+                                <span class="block text-[10px] text-slate-500 font-semibold uppercase mb-1">Date Range</span>
+                                <span id="geo-date-range" class="block text-slate-200 font-semibold truncate">No data loaded</span>
+                            </div>
+                            <div class="bg-slate-900/50 rounded-lg p-3 border border-slate-800/50">
+                                <span class="block text-[10px] text-slate-500 font-semibold uppercase mb-1">Average Incidence</span>
+                                <span id="geo-avg-incidence" class="block text-slate-200 font-semibold truncate">No data loaded</span>
+                            </div>
+                        </div>
+
+                        <div class="space-y-1">
+                            <div class="flex items-center justify-between">
+                                <span class="text-[11px] text-slate-400">Images by Country</span>
+                                <span id="geo-country-source" class="text-[9px] text-slate-500 font-mono">metadata + centroid</span>
+                            </div>
+                            <div class="relative h-44 w-full bg-slate-900/50 rounded-lg p-2 border border-slate-800/50">
+                                <canvas id="countryChart"></canvas>
+                            </div>
+                            <div id="country-list" class="space-y-1 pt-1"></div>
+                        </div>
+
+                        <div class="space-y-1">
+                            <span class="text-[11px] text-slate-400">Images by State / Region</span>
+                            <div class="relative h-44 w-full bg-slate-900/50 rounded-lg p-2 border border-slate-800/50">
+                                <canvas id="stateChart"></canvas>
+                            </div>
+                            <div id="state-list" class="space-y-1 pt-1"></div>
+                        </div>
+
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                            <div class="space-y-1">
+                                <span class="text-[11px] text-slate-400">Collection Timeline</span>
+                                <div class="relative h-36 bg-slate-900/50 rounded-lg p-2 border border-slate-800/50">
+                                    <canvas id="timelineChart"></canvas>
+                                </div>
+                            </div>
+                            <div class="space-y-1">
+                                <span class="text-[11px] text-slate-400">Product Types</span>
+                                <div class="relative h-36 bg-slate-900/50 rounded-lg p-2 border border-slate-800/50">
+                                    <canvas id="productTypeChart"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Statistics Dashboard (Charts) -->
                     <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-4">
                         <div class="flex justify-between items-center">
@@ -315,6 +404,42 @@
                                 <i data-lucide="monitor-play" class="w-4 h-4"></i>
                                 Stream High-Res GeoTIFF to Map
                             </button>
+                        </div>
+
+                        <!-- GeoTIFF Diagnostics Section -->
+                        <div id="geotiff-diagnostics-panel" class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-3">
+                            <div class="flex items-center justify-between">
+                                <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                                    <i data-lucide="activity" class="w-3.5 h-3.5 text-emerald-400"></i> GeoTIFF Diagnostics
+                                </h3>
+                                <span id="geotiff-diagnostics-status" class="text-[9px] px-2 py-0.5 bg-slate-900 text-slate-500 border border-slate-800 rounded font-mono">No raster loaded</span>
+                            </div>
+                            <div class="grid grid-cols-2 gap-2 text-xs">
+                                <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                                    <span class="text-slate-500 text-[10px] block font-semibold">Raster Size</span>
+                                    <span id="diag-raster-size" class="font-bold text-slate-300 font-mono">-</span>
+                                </div>
+                                <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                                    <span class="text-slate-500 text-[10px] block font-semibold">Bands / Type</span>
+                                    <span id="diag-raster-bands" class="font-bold text-slate-300 font-mono">-</span>
+                                </div>
+                                <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                                    <span class="text-slate-500 text-[10px] block font-semibold">CRS / Projection</span>
+                                    <span id="diag-raster-crs" class="font-bold text-slate-300 font-mono">-</span>
+                                </div>
+                                <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                                    <span class="text-slate-500 text-[10px] block font-semibold">Pixel Size</span>
+                                    <span id="diag-raster-pixel-size" class="font-bold text-slate-300 font-mono">-</span>
+                                </div>
+                                <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800 col-span-2">
+                                    <span class="text-slate-500 text-[10px] block font-semibold">Raster Bounds</span>
+                                    <span id="diag-raster-bounds" class="font-bold text-slate-300 font-mono text-[10px] break-all">-</span>
+                                </div>
+                                <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800 col-span-2">
+                                    <span class="text-slate-500 text-[10px] block font-semibold">Browser Georeference Check</span>
+                                    <span id="diag-raster-georef" class="font-medium text-slate-300 text-[10px] leading-relaxed block">Stream a GEC GeoTIFF to inspect CRS, bounds, pixel size, and possible rotation/skew warnings.</span>
+                                </div>
+                            </div>
                         </div>
 
                         <!-- Quicklook Section -->
@@ -562,6 +687,10 @@
         let incidenceChartInstance = null;
         let polarizationChartInstance = null;
         let platformChartInstance = null;
+        let countryChartInstance = null;
+        let stateChartInstance = null;
+        let timelineChartInstance = null;
+        let productTypeChartInstance = null;
 
         // Reference endpoints retained inside the application for diagnostics and user copy/paste workflows.
         const REFERENCE_URLS = [
@@ -1343,6 +1472,7 @@
             document.getElementById('export-geojson-btn').addEventListener('click', exportGeoJSON);
             document.getElementById('export-csv-btn').addEventListener('click', exportCSV);
             document.getElementById('render-charts-btn').addEventListener('click', updateAnalyticsCharts);
+            document.getElementById('export-geo-analytics-btn')?.addEventListener('click', exportGeoAnalyticsCSV);
 
             document.getElementById('filter-search').addEventListener('input', applyFilters);
             document.getElementById('filter-incidence').addEventListener('input', function() {
@@ -2989,6 +3119,56 @@
             }
         }
 
+        function updateGeoTiffDiagnostics(georaster, tiffInfo, url) {
+            const status = document.getElementById('geotiff-diagnostics-status');
+            if (status) {
+                status.innerText = 'Loaded';
+                status.className = 'text-[9px] px-2 py-0.5 bg-emerald-950/40 text-emerald-300 border border-emerald-800/40 rounded font-mono';
+            }
+            const width = georaster?.width || georaster?.rasterWidth || '-';
+            const height = georaster?.height || georaster?.rasterHeight || '-';
+            safeSetText('diag-raster-size', `${width} × ${height}`);
+            const bands = georaster?.numberOfRasters || georaster?.values?.length || georaster?.mins?.length || 1;
+            safeSetText('diag-raster-bands', `${bands} band${bands === 1 ? '' : 's'} · ${tiffInfo?.tiffType || 'TIFF'}`);
+            safeSetText('diag-raster-crs', georaster?.projection ? `EPSG:${georaster.projection}` : 'Unknown / parsed by GeoRaster');
+            const px = Number.isFinite(georaster?.pixelWidth) ? georaster.pixelWidth : null;
+            const py = Number.isFinite(georaster?.pixelHeight) ? georaster.pixelHeight : null;
+            safeSetText('diag-raster-pixel-size', (px !== null && py !== null) ? `${px.toPrecision(6)} × ${Math.abs(py).toPrecision(6)}` : 'Unknown');
+            const boundsText = [georaster?.xmin, georaster?.ymin, georaster?.xmax, georaster?.ymax]
+                .every(v => Number.isFinite(v))
+                ? `xmin ${georaster.xmin.toFixed(6)}, ymin ${georaster.ymin.toFixed(6)}, xmax ${georaster.xmax.toFixed(6)}, ymax ${georaster.ymax.toFixed(6)}`
+                : 'Unknown bounds';
+            safeSetText('diag-raster-bounds', boundsText);
+
+            const transform = georaster?.geoTransform || georaster?.metadata?.geoTransform || georaster?.metadata?.ModelTransformationTag || georaster?.ModelTransformationTag;
+            let rotationWarning = 'No rotation/skew transform was exposed to the browser parser; Leaflet will render this as a sampled north-up raster grid.';
+            if (Array.isArray(transform) && transform.length >= 6) {
+                const skewX = Math.abs(Number(transform[2]) || 0);
+                const skewY = Math.abs(Number(transform[4]) || 0);
+                rotationWarning = (skewX > 1e-12 || skewY > 1e-12)
+                    ? `Rotation/skew terms detected in the transform. Browser rendering may be approximate versus QGIS/GDAL. Transform: ${transform.slice(0, 6).map(v => Number(v).toPrecision(6)).join(', ')}`
+                    : `North-up affine transform exposed. Browser offset is more likely SAR GEC ellipsoid/terrain geometry or reprojection sampling.`;
+            }
+            const crsNote = georaster?.projection && ![4326, 3857].includes(Number(georaster.projection))
+                ? ` CRS EPSG:${georaster.projection} requires browser reprojection through proj4/georaster-layer-for-leaflet.`
+                : '';
+            safeSetText('diag-raster-georef', `${rotationWarning}${crsNote} Source: ${getRasterDisplayName(url)}`);
+        }
+
+        function clearGeoTiffDiagnostics() {
+            const status = document.getElementById('geotiff-diagnostics-status');
+            if (status) {
+                status.innerText = 'No raster loaded';
+                status.className = 'text-[9px] px-2 py-0.5 bg-slate-900 text-slate-500 border border-slate-800 rounded font-mono';
+            }
+            safeSetText('diag-raster-size', '-');
+            safeSetText('diag-raster-bands', '-');
+            safeSetText('diag-raster-crs', '-');
+            safeSetText('diag-raster-pixel-size', '-');
+            safeSetText('diag-raster-bounds', '-');
+            safeSetText('diag-raster-georef', 'Stream a GEC GeoTIFF to inspect CRS, bounds, pixel size, and possible rotation/skew warnings.');
+        }
+
         // Dynamic Client-Side GeoTIFF/COG Streaming Engine using Main Thread ArrayBuffer
         // Dynamic Client-Side GeoTIFF/COG Streaming Engine using strict URL preflight + main-thread ArrayBuffer parsing
         async function streamGeoTiffToMap(url, btnElement) {
@@ -3067,6 +3247,7 @@
                     title: getRasterDisplayName(url)
                 };
                 activeGeoRasterLayer = createGeoRasterLeafletLayer(georaster, stretch);
+                updateGeoTiffDiagnostics(georaster, tiffInfo, url);
 
                 // Render dynamically on basemap if the GeoTIFF layer is enabled.
                 if (geoTiffLayerVisible) activeGeoRasterLayer.addTo(map);
@@ -3111,13 +3292,16 @@
                 if (map && map.hasLayer(activeGeoRasterLayer)) map.removeLayer(activeGeoRasterLayer);
                 activeGeoRasterLayer = null;
             }
-            if (clearContext) activeGeoRasterContext = null;
+            if (clearContext) {
+                activeGeoRasterContext = null;
+                clearGeoTiffDiagnostics();
+            }
             document.getElementById('raster-layer-status').classList.add('hidden');
             updateLayerControlPanel();
         }
 
 
-        // --- v1.3.8 UUID-first Umbra deliverables resolver override -------------------------------
+        // --- v1.3.9 UUID-first Umbra deliverables resolver override -------------------------------
         // The STAC date index lives under paths like stac/2025/2025-06/2025-06-10/<uuid>/...
         // The actual imagery lives under sar-data/tasks/<target path>/<collection-id>/<collect-folder>/.
         // These overrides prevent date-index folders from being treated as delivery folders and add a
@@ -3683,6 +3867,7 @@
 
             document.getElementById('status-text').innerText = `Filter matches: ${filteredItems.length} of ${loadedItems.length}`;
             updateLoadedItemsUIList();
+            updateAnalyticsCharts();
             updateLayerControlPanel();
         }
 
@@ -3722,17 +3907,434 @@
             updateLayerControlPanel();
         }
 
-        // Dynamic Chart Engine utilizing ChartJS
+        // --- v1.3.9 Analytics Engine ----------------------------------------------------
+        // This section keeps analytics fully client-side for GitHub Pages. Geography is inferred
+        // from STAC/Umbra target metadata first, then from footprint centroids against a compact
+        // built-in resolver. It is intended for operational rollups, not legal boundary precision.
+
+        const US_STATE_BOUNDS = [
+            { name: "Alabama", code: "AL", minLat: 30.1, maxLat: 35.1, minLng: -88.6, maxLng: -84.8 },
+            { name: "Alaska", code: "AK", minLat: 51.0, maxLat: 72.0, minLng: -179.9, maxLng: -129.9 },
+            { name: "Arizona", code: "AZ", minLat: 31.2, maxLat: 37.1, minLng: -114.9, maxLng: -109.0 },
+            { name: "Arkansas", code: "AR", minLat: 33.0, maxLat: 36.6, minLng: -94.7, maxLng: -89.6 },
+            { name: "California", code: "CA", minLat: 32.4, maxLat: 42.1, minLng: -124.5, maxLng: -114.1 },
+            { name: "Colorado", code: "CO", minLat: 36.9, maxLat: 41.1, minLng: -109.1, maxLng: -102.0 },
+            { name: "Connecticut", code: "CT", minLat: 40.9, maxLat: 42.1, minLng: -73.8, maxLng: -71.7 },
+            { name: "Delaware", code: "DE", minLat: 38.4, maxLat: 39.9, minLng: -75.8, maxLng: -75.0 },
+            { name: "District of Columbia", code: "DC", minLat: 38.7, maxLat: 39.0, minLng: -77.2, maxLng: -76.9 },
+            { name: "Florida", code: "FL", minLat: 24.3, maxLat: 31.1, minLng: -87.7, maxLng: -79.8 },
+            { name: "Georgia", code: "GA", minLat: 30.3, maxLat: 35.1, minLng: -85.7, maxLng: -80.8 },
+            { name: "Hawaii", code: "HI", minLat: 18.8, maxLat: 22.5, minLng: -160.4, maxLng: -154.7 },
+            { name: "Idaho", code: "ID", minLat: 42.0, maxLat: 49.1, minLng: -117.3, maxLng: -111.0 },
+            { name: "Illinois", code: "IL", minLat: 36.9, maxLat: 42.6, minLng: -91.6, maxLng: -87.0 },
+            { name: "Indiana", code: "IN", minLat: 37.7, maxLat: 41.8, minLng: -88.2, maxLng: -84.7 },
+            { name: "Iowa", code: "IA", minLat: 40.3, maxLat: 43.6, minLng: -96.7, maxLng: -90.1 },
+            { name: "Kansas", code: "KS", minLat: 36.9, maxLat: 40.1, minLng: -102.1, maxLng: -94.5 },
+            { name: "Kentucky", code: "KY", minLat: 36.4, maxLat: 39.2, minLng: -89.7, maxLng: -81.9 },
+            { name: "Louisiana", code: "LA", minLat: 28.8, maxLat: 33.1, minLng: -94.1, maxLng: -88.7 },
+            { name: "Maine", code: "ME", minLat: 42.9, maxLat: 47.5, minLng: -71.2, maxLng: -66.8 },
+            { name: "Maryland", code: "MD", minLat: 37.8, maxLat: 39.8, minLng: -79.6, maxLng: -75.0 },
+            { name: "Massachusetts", code: "MA", minLat: 41.2, maxLat: 42.9, minLng: -73.6, maxLng: -69.8 },
+            { name: "Michigan", code: "MI", minLat: 41.6, maxLat: 48.4, minLng: -90.5, maxLng: -82.1 },
+            { name: "Minnesota", code: "MN", minLat: 43.4, maxLat: 49.4, minLng: -97.3, maxLng: -89.4 },
+            { name: "Mississippi", code: "MS", minLat: 30.1, maxLat: 35.1, minLng: -91.7, maxLng: -88.0 },
+            { name: "Missouri", code: "MO", minLat: 35.9, maxLat: 40.7, minLng: -95.8, maxLng: -89.0 },
+            { name: "Montana", code: "MT", minLat: 44.2, maxLat: 49.1, minLng: -116.1, maxLng: -104.0 },
+            { name: "Nebraska", code: "NE", minLat: 39.9, maxLat: 43.1, minLng: -104.1, maxLng: -95.2 },
+            { name: "Nevada", code: "NV", minLat: 35.0, maxLat: 42.1, minLng: -120.1, maxLng: -114.0 },
+            { name: "New Hampshire", code: "NH", minLat: 42.6, maxLat: 45.4, minLng: -72.6, maxLng: -70.6 },
+            { name: "New Jersey", code: "NJ", minLat: 38.8, maxLat: 41.4, minLng: -75.6, maxLng: -73.8 },
+            { name: "New Mexico", code: "NM", minLat: 31.3, maxLat: 37.1, minLng: -109.1, maxLng: -103.0 },
+            { name: "New York", code: "NY", minLat: 40.4, maxLat: 45.1, minLng: -79.8, maxLng: -71.8 },
+            { name: "North Carolina", code: "NC", minLat: 33.8, maxLat: 36.7, minLng: -84.4, maxLng: -75.3 },
+            { name: "North Dakota", code: "ND", minLat: 45.9, maxLat: 49.1, minLng: -104.1, maxLng: -96.5 },
+            { name: "Ohio", code: "OH", minLat: 38.3, maxLat: 42.4, minLng: -84.9, maxLng: -80.5 },
+            { name: "Oklahoma", code: "OK", minLat: 33.6, maxLat: 37.1, minLng: -103.1, maxLng: -94.4 },
+            { name: "Oregon", code: "OR", minLat: 41.9, maxLat: 46.4, minLng: -124.7, maxLng: -116.4 },
+            { name: "Pennsylvania", code: "PA", minLat: 39.7, maxLat: 42.6, minLng: -80.6, maxLng: -74.6 },
+            { name: "Rhode Island", code: "RI", minLat: 41.1, maxLat: 42.1, minLng: -71.9, maxLng: -71.0 },
+            { name: "South Carolina", code: "SC", minLat: 32.0, maxLat: 35.3, minLng: -83.4, maxLng: -78.5 },
+            { name: "South Dakota", code: "SD", minLat: 42.4, maxLat: 45.9, minLng: -104.1, maxLng: -96.4 },
+            { name: "Tennessee", code: "TN", minLat: 34.9, maxLat: 36.7, minLng: -90.4, maxLng: -81.5 },
+            { name: "Texas", code: "TX", minLat: 25.7, maxLat: 36.6, minLng: -106.7, maxLng: -93.4 },
+            { name: "Utah", code: "UT", minLat: 36.9, maxLat: 42.1, minLng: -114.1, maxLng: -109.0 },
+            { name: "Vermont", code: "VT", minLat: 42.7, maxLat: 45.1, minLng: -73.5, maxLng: -71.5 },
+            { name: "Virginia", code: "VA", minLat: 36.5, maxLat: 39.5, minLng: -83.8, maxLng: -75.1 },
+            { name: "Washington", code: "WA", minLat: 45.5, maxLat: 49.1, minLng: -124.9, maxLng: -116.9 },
+            { name: "West Virginia", code: "WV", minLat: 37.1, maxLat: 40.7, minLng: -82.7, maxLng: -77.6 },
+            { name: "Wisconsin", code: "WI", minLat: 42.4, maxLat: 47.1, minLng: -92.9, maxLng: -86.8 },
+            { name: "Wyoming", code: "WY", minLat: 40.9, maxLat: 45.1, minLng: -111.1, maxLng: -104.0 }
+        ];
+
+        const COUNTRY_BOUNDS = [
+            { name: "United States", minLat: 18.0, maxLat: 72.0, minLng: -179.9, maxLng: -66.0 },
+            { name: "Canada", minLat: 41.5, maxLat: 83.2, minLng: -141.2, maxLng: -52.5 },
+            { name: "Mexico", minLat: 14.3, maxLat: 32.8, minLng: -118.5, maxLng: -86.5 },
+            { name: "Brazil", minLat: -34.0, maxLat: 5.5, minLng: -74.1, maxLng: -34.7 },
+            { name: "Argentina", minLat: -55.1, maxLat: -21.7, minLng: -73.7, maxLng: -53.5 },
+            { name: "Chile", minLat: -56.0, maxLat: -17.0, minLng: -76.0, maxLng: -66.0 },
+            { name: "United Kingdom", minLat: 49.8, maxLat: 60.9, minLng: -8.8, maxLng: 2.0 },
+            { name: "France", minLat: 41.0, maxLat: 51.3, minLng: -5.5, maxLng: 9.8 },
+            { name: "Germany", minLat: 47.1, maxLat: 55.1, minLng: 5.8, maxLng: 15.1 },
+            { name: "Italy", minLat: 35.4, maxLat: 47.2, minLng: 6.3, maxLng: 18.8 },
+            { name: "Spain", minLat: 35.8, maxLat: 43.9, minLng: -9.5, maxLng: 4.4 },
+            { name: "Norway", minLat: 57.8, maxLat: 71.5, minLng: 4.0, maxLng: 31.5 },
+            { name: "Finland", minLat: 59.7, maxLat: 70.2, minLng: 19.0, maxLng: 31.7 },
+            { name: "Ukraine", minLat: 44.2, maxLat: 52.4, minLng: 22.1, maxLng: 40.3 },
+            { name: "Turkey", minLat: 35.8, maxLat: 42.2, minLng: 25.6, maxLng: 44.8 },
+            { name: "Israel", minLat: 29.4, maxLat: 33.4, minLng: 34.2, maxLng: 35.9 },
+            { name: "Saudi Arabia", minLat: 16.0, maxLat: 32.2, minLng: 34.4, maxLng: 55.8 },
+            { name: "United Arab Emirates", minLat: 22.4, maxLat: 26.3, minLng: 51.5, maxLng: 56.5 },
+            { name: "India", minLat: 6.5, maxLat: 35.6, minLng: 68.1, maxLng: 97.5 },
+            { name: "China", minLat: 18.0, maxLat: 53.7, minLng: 73.3, maxLng: 135.2 },
+            { name: "Japan", minLat: 24.0, maxLat: 46.0, minLng: 122.0, maxLng: 146.5 },
+            { name: "South Korea", minLat: 33.0, maxLat: 39.7, minLng: 124.5, maxLng: 131.9 },
+            { name: "Taiwan", minLat: 21.8, maxLat: 25.4, minLng: 119.3, maxLng: 122.1 },
+            { name: "Singapore", minLat: 1.1, maxLat: 1.6, minLng: 103.5, maxLng: 104.1 },
+            { name: "Indonesia", minLat: -11.2, maxLat: 6.3, minLng: 94.8, maxLng: 141.1 },
+            { name: "Australia", minLat: -44.0, maxLat: -10.0, minLng: 112.0, maxLng: 154.0 },
+            { name: "New Zealand", minLat: -47.5, maxLat: -34.0, minLng: 166.0, maxLng: 179.5 },
+            { name: "South Africa", minLat: -35.0, maxLat: -22.0, minLng: 16.0, maxLng: 33.5 },
+            { name: "Egypt", minLat: 22.0, maxLat: 32.1, minLng: 24.7, maxLng: 36.9 }
+        ];
+
+        const COUNTRY_ALIASES = {
+            "usa": "United States", "u.s.a.": "United States", "u.s.a": "United States", "us": "United States", "u.s.": "United States", "united states of america": "United States",
+            "uk": "United Kingdom", "u.k.": "United Kingdom", "great britain": "United Kingdom", "england": "United Kingdom",
+            "republic of korea": "South Korea", "korea": "South Korea", "uae": "United Arab Emirates", "u.a.e.": "United Arab Emirates"
+        };
+
+        const US_STATE_ALIASES = Object.fromEntries(US_STATE_BOUNDS.flatMap(s => [[s.name.toLowerCase(), s.name], [s.code.toLowerCase(), s.name]]));
+
+        function isAnalyticsFilterActive() {
+            const search = document.getElementById('filter-search')?.value?.trim();
+            const incidence = parseInt(document.getElementById('filter-incidence')?.value || '0') || 0;
+            const platform = document.getElementById('filter-platform')?.value || 'ALL';
+            const checkedPols = Array.from(document.querySelectorAll('.polarization-filter:checked')).map(el => el.value);
+            return Boolean(search) || incidence > 0 || platform !== 'ALL' || checkedPols.length < 2;
+        }
+
+        function getAnalyticsDataItems() {
+            if (isAnalyticsFilterActive()) return filteredItems;
+            return loadedItems;
+        }
+
+        function safeSetText(id, value) {
+            const el = document.getElementById(id);
+            if (el) el.innerText = value;
+        }
+
+        function normaliseTextToken(value) {
+            if (!value) return "";
+            let text = String(value);
+            try { text = decodeURIComponent(text); } catch(e) {}
+            return text
+                .replace(/[_]+/g, ' ')
+                .replace(/\.(json|tif|tiff|nitf|ntf|cphd|png|jpg|jpeg)$/i, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+        }
+
+        function normalizeCountryName(value) {
+            const cleaned = normaliseTextToken(value).replace(/^[\s,/-]+|[\s,/-]+$/g, '');
+            const key = cleaned.toLowerCase();
+            if (COUNTRY_ALIASES[key]) return COUNTRY_ALIASES[key];
+            const match = COUNTRY_BOUNDS.find(c => c.name.toLowerCase() === key);
+            if (match) return match.name;
+            if (/^[A-Z][A-Za-z .'-]{2,}$/.test(cleaned)) return cleaned;
+            return "";
+        }
+
+        function normalizeRegionName(value, country = "") {
+            const cleaned = normaliseTextToken(value).replace(/^[\s,/-]+|[\s,/-]+$/g, '');
+            const key = cleaned.toLowerCase();
+            if (!cleaned) return "";
+            if (country === "United States" && US_STATE_ALIASES[key]) return US_STATE_ALIASES[key];
+            return cleaned;
+        }
+
+        function parseLocationFromText(value) {
+            const text = normaliseTextToken(value)
+                .replace(/\bUMBRA[- ]?\d+\b/gi, '')
+                .replace(/\b\d{4}-\d{2}-\d{2}(?:-\d{2}-\d{2}-\d{2})?\b/g, '')
+                .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/ig, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+            if (!text || text.length < 3) return { locality: "", region: "", country: "" };
+
+            const commaParts = text.split(',').map(p => normaliseTextToken(p)).filter(Boolean);
+            if (commaParts.length >= 2) {
+                const maybeCountry = normalizeCountryName(commaParts[commaParts.length - 1]);
+                const maybeRegion = normalizeRegionName(commaParts[commaParts.length - 2], maybeCountry);
+                const locality = commaParts.slice(0, -2).join(', ') || commaParts[0];
+                return { locality, region: maybeRegion, country: maybeCountry };
+            }
+
+            // Scan free-text names such as "Long Beach California United States".
+            const lower = text.toLowerCase();
+            let country = "";
+            for (const candidate of COUNTRY_BOUNDS.map(c => c.name).concat(Object.keys(COUNTRY_ALIASES))) {
+                if (lower.includes(candidate.toLowerCase())) {
+                    country = normalizeCountryName(candidate);
+                    break;
+                }
+            }
+            let region = "";
+            for (const state of US_STATE_BOUNDS) {
+                if (lower.includes(state.name.toLowerCase()) || lower.includes(` ${state.code.toLowerCase()} `)) {
+                    region = state.name;
+                    if (!country) country = "United States";
+                    break;
+                }
+            }
+            return { locality: text, region, country };
+        }
+
+        function getTextLocationCandidates(item) {
+            const props = item.properties || {};
+            const candidates = [
+                props['umbra:target_name'], props['title'], props['description'], item.title, item.id,
+                props['place'], props['location'], props['city'], props['state'], props['country']
+            ].filter(Boolean);
+            if (item.sourceUrl) {
+                try {
+                    const u = new URL(item.sourceUrl);
+                    const parts = u.pathname.split('/').map(p => normaliseTextToken(p)).filter(Boolean);
+                    const uuidIndex = parts.findIndex(p => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(p));
+                    if (uuidIndex > 0) candidates.push(parts.slice(Math.max(0, uuidIndex - 3), uuidIndex).join(', '));
+                } catch(e) {}
+            }
+            if (item.assets) {
+                Object.values(item.assets).slice(0, 8).forEach(asset => {
+                    if (asset?.href) {
+                        try {
+                            const u = new URL(translateS3Url(asset.href, item.sourceUrl));
+                            const parts = u.pathname.split('/').map(p => normaliseTextToken(p)).filter(Boolean);
+                            const tasksIdx = parts.findIndex(p => p.toLowerCase() === 'tasks');
+                            const uuidIndex = parts.findIndex(p => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(p));
+                            if (tasksIdx !== -1 && uuidIndex > tasksIdx + 1) candidates.push(parts.slice(tasksIdx + 1, uuidIndex).join(', '));
+                        } catch(e) {}
+                    }
+                });
+            }
+            return candidates;
+        }
+
+        function getGeometryCentroid(geometry) {
+            if (!geometry || !geometry.coordinates) return null;
+            const points = [];
+            const walk = coords => {
+                if (!Array.isArray(coords)) return;
+                if (typeof coords[0] === 'number' && typeof coords[1] === 'number') {
+                    points.push([coords[0], coords[1]]);
+                    return;
+                }
+                coords.forEach(walk);
+            };
+            walk(geometry.coordinates);
+            if (points.length === 0) return null;
+            const lng = points.reduce((sum, p) => sum + p[0], 0) / points.length;
+            const lat = points.reduce((sum, p) => sum + p[1], 0) / points.length;
+            return { lat, lng };
+        }
+
+        function findBoundsMatch(lat, lng, boundsList) {
+            if (typeof lat !== 'number' || typeof lng !== 'number' || isNaN(lat) || isNaN(lng)) return null;
+            return boundsList.find(b => lat >= b.minLat && lat <= b.maxLat && lng >= b.minLng && lng <= b.maxLng) || null;
+        }
+
+        function deriveGeoAnalytics(item) {
+            const props = item.properties || {};
+            let locality = "";
+            let region = "";
+            let country = "";
+            let source = "unresolved";
+            let confidence = "low";
+
+            for (const candidate of getTextLocationCandidates(item)) {
+                const parsed = parseLocationFromText(candidate);
+                if (parsed.country || parsed.region) {
+                    locality = parsed.locality || locality;
+                    country = parsed.country || country;
+                    region = parsed.region || region;
+                    source = candidate === props['umbra:target_name'] ? "target metadata" : "metadata/path text";
+                    confidence = parsed.country && parsed.region ? "high" : "medium";
+                    break;
+                }
+            }
+
+            const centroid = getGeometryCentroid(item.geometry);
+            if ((!country || !region) && centroid) {
+                const stateMatch = findBoundsMatch(centroid.lat, centroid.lng, US_STATE_BOUNDS);
+                if (stateMatch) {
+                    country = country || "United States";
+                    region = region || stateMatch.name;
+                    source = source === "unresolved" ? "footprint centroid" : `${source} + centroid`;
+                    confidence = confidence === "low" ? "medium" : confidence;
+                }
+                if (!country) {
+                    const countryMatch = findBoundsMatch(centroid.lat, centroid.lng, COUNTRY_BOUNDS);
+                    if (countryMatch) {
+                        country = countryMatch.name;
+                        source = source === "unresolved" ? "footprint centroid" : `${source} + centroid`;
+                        confidence = "medium";
+                    }
+                }
+            }
+
+            country = country || "Unresolved";
+            region = region || (country === "Unresolved" ? "Unresolved" : `${country} / Unspecified`);
+            return {
+                id: item.id || "",
+                target: props['umbra:target_name'] || item.id || "Unknown target",
+                country,
+                region,
+                locality,
+                lat: centroid?.lat ?? null,
+                lng: centroid?.lng ?? null,
+                source,
+                confidence,
+                platform: props.platform || "Unknown",
+                datetime: props.datetime || "",
+                incidence: parseFloat(props['view:incidence_angle']),
+                product: props['sar:product_type'] || props['product_type'] || "Unknown",
+                polarization: (props['sar:polarizations'] || []).join('/') || "Unknown"
+            };
+        }
+
+        function countBy(records, keyFn) {
+            const counts = {};
+            records.forEach(record => {
+                const key = keyFn(record) || "Unknown";
+                counts[key] = (counts[key] || 0) + 1;
+            });
+            return counts;
+        }
+
+        function topEntries(counts, limit = 8) {
+            return Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, limit);
+        }
+
+        function formatDateRange(items) {
+            const dates = items.map(i => i.properties?.datetime ? new Date(i.properties.datetime) : null).filter(d => d && !isNaN(d));
+            if (dates.length === 0) return "No date metadata";
+            const min = new Date(Math.min(...dates));
+            const max = new Date(Math.max(...dates));
+            return `${min.toLocaleDateString()} → ${max.toLocaleDateString()}`;
+        }
+
+        function average(values) {
+            const clean = values.filter(v => typeof v === 'number' && !isNaN(v));
+            if (clean.length === 0) return null;
+            return clean.reduce((a, b) => a + b, 0) / clean.length;
+        }
+
+        function resetGeoAnalyticsSummary() {
+            safeSetText('geo-total-collects', '0');
+            safeSetText('geo-country-count', '0');
+            safeSetText('geo-state-count', '0');
+            safeSetText('geo-unresolved-count', '0');
+            safeSetText('geo-top-country', 'No data loaded');
+            safeSetText('geo-top-region', 'No data loaded');
+            safeSetText('geo-date-range', 'No data loaded');
+            safeSetText('geo-avg-incidence', 'No data loaded');
+            const countryList = document.getElementById('country-list');
+            if (countryList) countryList.innerHTML = '';
+            const stateList = document.getElementById('state-list');
+            if (stateList) stateList.innerHTML = '';
+        }
+
+        function renderRankList(containerId, counts, total) {
+            const el = document.getElementById(containerId);
+            if (!el) return;
+            const entries = topEntries(counts, 8);
+            if (entries.length === 0) {
+                el.innerHTML = '<p class="text-[10px] text-slate-500">No geographic categories available.</p>';
+                return;
+            }
+            const max = Math.max(...entries.map(e => e[1]), 1);
+            el.innerHTML = entries.map(([label, count]) => {
+                const pct = total ? Math.round((count / total) * 100) : 0;
+                const width = Math.max(4, Math.round((count / max) * 100));
+                return `
+                    <div class="bg-slate-900/60 border border-slate-800 rounded px-2 py-1.5">
+                        <div class="flex items-center justify-between gap-2 text-[10px]">
+                            <span class="text-slate-300 truncate font-semibold">${escapeHtml(label)}</span>
+                            <span class="text-emerald-300 font-mono shrink-0">${count} (${pct}%)</span>
+                        </div>
+                        <div class="mt-1 h-1 bg-slate-800 rounded overflow-hidden"><div class="h-1 bg-emerald-500/70" style="width:${width}%"></div></div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderBarChart(canvasId, existingInstance, counts, label, maxItems = 10) {
+            const canvas = document.getElementById(canvasId);
+            if (!canvas) return existingInstance;
+            if (existingInstance) existingInstance.destroy();
+            const entries = topEntries(counts, maxItems);
+            if (entries.length === 0) return null;
+            return new Chart(canvas.getContext('2d'), {
+                type: 'bar',
+                data: {
+                    labels: entries.map(e => e[0]),
+                    datasets: [{
+                        label,
+                        data: entries.map(e => e[1]),
+                        backgroundColor: 'rgba(16, 185, 129, 0.45)',
+                        borderColor: '#10b981',
+                        borderWidth: 1.5,
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 9 }, maxRotation: 50, minRotation: 0 } },
+                        y: { grid: { color: '#1e293b' }, ticks: { color: '#94a3b8', font: { size: 9 }, precision: 0 } }
+                    }
+                }
+            });
+        }
+
         function updateAnalyticsCharts() {
-            if (loadedItems.length === 0) {
-                // Destroy charts if empty
+            const dataItems = getAnalyticsDataItems();
+            if (loadedItems.length === 0 || dataItems.length === 0) {
                 destroyAllCharts();
+                resetGeoAnalyticsSummary();
+                if (loadedItems.length > 0) {
+                    safeSetText('geo-total-collects', '0');
+                    safeSetText('geo-top-country', 'No filtered matches');
+                    safeSetText('geo-top-region', 'No filtered matches');
+                }
                 return;
             }
 
-            const dataItems = filteredItems.length > 0 ? filteredItems : loadedItems;
+            const geoRecords = dataItems.map(deriveGeoAnalytics);
+            const countryCounts = countBy(geoRecords, r => r.country);
+            const regionCounts = countBy(geoRecords, r => r.region);
+            const unresolvedCount = geoRecords.filter(r => r.country === 'Unresolved' || r.region === 'Unresolved').length;
+            const topCountry = topEntries(countryCounts, 1)[0];
+            const topRegion = topEntries(regionCounts, 1)[0];
+            const avgIncidence = average(geoRecords.map(r => r.incidence));
 
-            // 1. Incidence Angles Data Parsing
+            safeSetText('geo-total-collects', dataItems.length.toLocaleString());
+            safeSetText('geo-country-count', Object.keys(countryCounts).filter(k => k !== 'Unresolved').length.toLocaleString());
+            safeSetText('geo-state-count', Object.keys(regionCounts).filter(k => !k.includes('/ Unspecified') && k !== 'Unresolved').length.toLocaleString());
+            safeSetText('geo-unresolved-count', unresolvedCount.toLocaleString());
+            safeSetText('geo-top-country', topCountry ? `${topCountry[0]} (${topCountry[1]} image${topCountry[1] === 1 ? '' : 's'})` : 'No data');
+            safeSetText('geo-top-region', topRegion ? `${topRegion[0]} (${topRegion[1]} image${topRegion[1] === 1 ? '' : 's'})` : 'No data');
+            safeSetText('geo-date-range', formatDateRange(dataItems));
+            safeSetText('geo-avg-incidence', avgIncidence === null ? 'No incidence metadata' : `${avgIncidence.toFixed(2)}°`);
+            safeSetText('geo-country-source', `${geoRecords.filter(r => r.source !== 'unresolved').length}/${geoRecords.length} resolved`);
+            renderRankList('country-list', countryCounts, dataItems.length);
+            renderRankList('state-list', regionCounts, dataItems.length);
+
+            countryChartInstance = renderBarChart('countryChart', countryChartInstance, countryCounts, 'Images by Country', 10);
+            stateChartInstance = renderBarChart('stateChart', stateChartInstance, regionCounts, 'Images by State / Region', 10);
+
             const incidenceAngles = dataItems.map(i => parseFloat(i.properties?.["view:incidence_angle"])).filter(v => !isNaN(v));
             const buckets = { "20-30°": 0, "30-40°": 0, "40-50°": 0, "50-60°": 0, "60°+": 0 };
             incidenceAngles.forEach(v => {
@@ -3743,125 +4345,136 @@
                 else if (v >= 60) buckets["60°+"]++;
             });
 
-            // 2. Polarizations breakdown
             const polCounts = {};
             dataItems.forEach(i => {
                 const pols = i.properties?.["sar:polarizations"] || [];
-                pols.forEach(p => {
-                    polCounts[p] = (polCounts[p] || 0) + 1;
-                });
+                pols.forEach(p => { polCounts[p] = (polCounts[p] || 0) + 1; });
             });
 
-            // 3. Platform Breakdown
             const platformCounts = {};
             dataItems.forEach(i => {
                 const plat = i.properties?.platform || "Unknown";
                 platformCounts[plat] = (platformCounts[plat] || 0) + 1;
             });
 
-            // Draw Charts
+            const productCounts = {};
+            dataItems.forEach(i => {
+                const product = i.properties?.["sar:product_type"] || i.properties?.product_type || "Unknown";
+                productCounts[product] = (productCounts[product] || 0) + 1;
+            });
+
+            const timelineCounts = {};
+            dataItems.forEach(i => {
+                if (!i.properties?.datetime) return;
+                const d = new Date(i.properties.datetime);
+                if (isNaN(d)) return;
+                const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+                timelineCounts[key] = (timelineCounts[key] || 0) + 1;
+            });
+
             renderIncidenceChart(buckets);
             renderPolarizationChart(polCounts);
             renderPlatformChart(platformCounts);
+            renderTimelineChart(timelineCounts);
+            renderProductTypeChart(productCounts);
         }
 
-        // Render standard bar histogram of SAR collected angles
         function renderIncidenceChart(buckets) {
-            const ctx = document.getElementById('incidenceChart').getContext('2d');
+            const ctx = document.getElementById('incidenceChart')?.getContext('2d');
+            if (!ctx) return;
             if (incidenceChartInstance) incidenceChartInstance.destroy();
-
             incidenceChartInstance = new Chart(ctx, {
                 type: 'bar',
                 data: {
                     labels: Object.keys(buckets),
-                    datasets: [{
-                        label: 'SAR Collects Count',
-                        data: Object.values(buckets),
-                        backgroundColor: 'rgba(99, 102, 241, 0.45)', // indigo
-                        borderColor: '#6366f1',
-                        borderWidth: 1.5,
-                        borderRadius: 4
-                    }]
+                    datasets: [{ label: 'SAR Collects Count', data: Object.values(buckets), backgroundColor: 'rgba(99, 102, 241, 0.45)', borderColor: '#6366f1', borderWidth: 1.5, borderRadius: 4 }]
                 },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: { legend: { display: false } },
-                    scales: {
-                        x: { grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 9 } } },
-                        y: { grid: { color: '#1e293b' }, ticks: { color: '#94a3b8', font: { size: 9 }, stepSize: 5 } }
-                    }
-                }
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 9 } } }, y: { grid: { color: '#1e293b' }, ticks: { color: '#94a3b8', font: { size: 9 }, precision: 0 } } } }
             });
         }
 
-        // Render circular polarization percentages
         function renderPolarizationChart(polCounts) {
-            const ctx = document.getElementById('polarizationChart').getContext('2d');
+            const ctx = document.getElementById('polarizationChart')?.getContext('2d');
+            if (!ctx) return;
             if (polarizationChartInstance) polarizationChartInstance.destroy();
-
             const labels = Object.keys(polCounts);
             if (labels.length === 0) return;
-
             polarizationChartInstance = new Chart(ctx, {
                 type: 'doughnut',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        data: Object.values(polCounts),
-                        backgroundColor: ['#6366f1', '#ec4899', '#f43f5e', '#e2e8f0'],
-                        borderWidth: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: { 
-                        legend: { 
-                            position: 'bottom',
-                            labels: { color: '#94a3b8', boxWidth: 8, font: { size: 9 } } 
-                        } 
-                    }
-                }
+                data: { labels, datasets: [{ data: Object.values(polCounts), backgroundColor: ['#6366f1', '#ec4899', '#f43f5e', '#e2e8f0'], borderWidth: 0 }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8', boxWidth: 8, font: { size: 9 } } } } }
             });
         }
 
-        // Render platform circular stats
         function renderPlatformChart(platformCounts) {
-            const ctx = document.getElementById('platformChart').getContext('2d');
+            const ctx = document.getElementById('platformChart')?.getContext('2d');
+            if (!ctx) return;
             if (platformChartInstance) platformChartInstance.destroy();
-
             const labels = Object.keys(platformCounts);
             if (labels.length === 0) return;
-
             platformChartInstance = new Chart(ctx, {
                 type: 'pie',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        data: Object.values(platformCounts),
-                        backgroundColor: ['#22c55e', '#3b82f6', '#eab308', '#a855f7'],
-                        borderWidth: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: { 
-                        legend: { 
-                            position: 'bottom',
-                            labels: { color: '#94a3b8', boxWidth: 8, font: { size: 9 } } 
-                        } 
-                    }
-                }
+                data: { labels, datasets: [{ data: Object.values(platformCounts), backgroundColor: ['#22c55e', '#3b82f6', '#eab308', '#a855f7'], borderWidth: 0 }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8', boxWidth: 8, font: { size: 9 } } } } }
             });
         }
 
-        // Clean out charts from active view memory
+        function renderTimelineChart(timelineCounts) {
+            const ctx = document.getElementById('timelineChart')?.getContext('2d');
+            if (!ctx) return;
+            if (timelineChartInstance) timelineChartInstance.destroy();
+            const labels = Object.keys(timelineCounts).sort();
+            if (labels.length === 0) return;
+            timelineChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: { labels, datasets: [{ label: 'Collects', data: labels.map(k => timelineCounts[k]), tension: 0.25, fill: true, backgroundColor: 'rgba(14, 165, 233, 0.16)', borderColor: '#38bdf8', pointRadius: 2 }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 9 }, maxRotation: 45 } }, y: { grid: { color: '#1e293b' }, ticks: { color: '#94a3b8', font: { size: 9 }, precision: 0 } } } }
+            });
+        }
+
+        function renderProductTypeChart(productCounts) {
+            const ctx = document.getElementById('productTypeChart')?.getContext('2d');
+            if (!ctx) return;
+            if (productTypeChartInstance) productTypeChartInstance.destroy();
+            const labels = Object.keys(productCounts);
+            if (labels.length === 0) return;
+            productTypeChartInstance = new Chart(ctx, {
+                type: 'doughnut',
+                data: { labels, datasets: [{ data: Object.values(productCounts), backgroundColor: ['#10b981', '#6366f1', '#f59e0b', '#ef4444', '#94a3b8'], borderWidth: 0 }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8', boxWidth: 8, font: { size: 9 } } } } }
+            });
+        }
+
         function destroyAllCharts() {
             if (incidenceChartInstance) { incidenceChartInstance.destroy(); incidenceChartInstance = null; }
             if (polarizationChartInstance) { polarizationChartInstance.destroy(); polarizationChartInstance = null; }
             if (platformChartInstance) { platformChartInstance.destroy(); platformChartInstance = null; }
+            if (countryChartInstance) { countryChartInstance.destroy(); countryChartInstance = null; }
+            if (stateChartInstance) { stateChartInstance.destroy(); stateChartInstance = null; }
+            if (timelineChartInstance) { timelineChartInstance.destroy(); timelineChartInstance = null; }
+            if (productTypeChartInstance) { productTypeChartInstance.destroy(); productTypeChartInstance = null; }
+        }
+
+        function exportGeoAnalyticsCSV() {
+            const dataItems = getAnalyticsDataItems();
+            if (dataItems.length === 0) {
+                notify("Export Blocked", "No loaded or filtered footprints are available for geographic analytics export.");
+                return;
+            }
+            const headers = ["ID", "Target", "Country", "State_or_Region", "Locality", "Platform", "Datetime", "Incidence_Angle", "Polarization", "Product_Type", "Centroid_Lat", "Centroid_Lng", "Geo_Source", "Confidence"];
+            const rows = [headers.join(',')];
+            dataItems.map(deriveGeoAnalytics).forEach(r => {
+                const vals = [r.id, r.target, r.country, r.region, r.locality, r.platform, r.datetime, isNaN(r.incidence) ? '' : r.incidence, r.polarization, r.product, r.lat ?? '', r.lng ?? '', r.source, r.confidence];
+                rows.push(vals.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','));
+            });
+            const csvContent = "data:text/csv;charset=utf-8," + encodeURIComponent(rows.join("\n"));
+            const downloadAnchor = document.createElement('a');
+            downloadAnchor.setAttribute("href", csvContent);
+            downloadAnchor.setAttribute("download", "umbra_sar_geographic_analytics.csv");
+            document.body.appendChild(downloadAnchor);
+            downloadAnchor.click();
+            downloadAnchor.remove();
+            document.getElementById('status-text').innerText = "Geographic analytics CSV exported";
         }
 
         // Export active collections footprints as standard GeoJSON
