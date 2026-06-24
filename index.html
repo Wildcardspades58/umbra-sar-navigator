@@ -72,7 +72,7 @@
             <div>
                 <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
                     Umbra SAR Navigator 
-                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.7</span>
+                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.8</span>
                     <span class="text-xs bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded font-normal">Analyst Tool</span>
                 </h1>
                 <p class="text-xs text-slate-400">Interactive OpenStreetMap client for Umbra Space SpatioTemporal Asset Catalogs</p>
@@ -460,6 +460,51 @@
                     <i data-lucide="trash-2" class="w-4 h-4"></i>
                 </button>
             </div>
+
+            <!-- Floating Operational Layer Controls -->
+            <div id="layer-control-panel" class="absolute bottom-4 right-4 z-[1000] w-72 bg-slate-950/92 backdrop-blur border border-slate-800 rounded-xl shadow-2xl text-xs text-slate-300 overflow-hidden">
+                <div class="px-3 py-2 border-b border-slate-800 bg-slate-900/80 flex items-center justify-between">
+                    <span class="font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                        <i data-lucide="layers-3" class="w-3.5 h-3.5 text-indigo-400"></i> Layer Controls
+                    </span>
+                    <span id="layer-control-status" class="text-[9px] text-indigo-300 font-mono">Ready</span>
+                </div>
+                <div class="p-3 space-y-2.5">
+                    <label class="flex items-center justify-between gap-3 cursor-pointer">
+                        <span class="flex items-center gap-2"><i data-lucide="square-dashed-mouse-pointer" class="w-3.5 h-3.5 text-indigo-400"></i> Footprints</span>
+                        <input type="checkbox" id="toggle-footprints-layer" checked class="accent-indigo-600">
+                    </label>
+                    <label class="flex items-center justify-between gap-3 cursor-pointer">
+                        <span class="flex items-center gap-2"><i data-lucide="image" class="w-3.5 h-3.5 text-blue-400"></i> Quicklook Overlay</span>
+                        <input type="checkbox" id="toggle-quicklook-layer" class="accent-indigo-600">
+                    </label>
+                    <label class="flex items-center justify-between gap-3 cursor-pointer">
+                        <span class="flex items-center gap-2"><i data-lucide="scan-line" class="w-3.5 h-3.5 text-emerald-400"></i> Streamed GeoTIFF</span>
+                        <input type="checkbox" id="toggle-geotiff-layer" checked class="accent-indigo-600">
+                    </label>
+
+                    <div class="border-t border-slate-800 pt-2 space-y-1.5">
+                        <label for="raster-quality-select" class="block text-[10px] uppercase tracking-wider text-slate-500 font-bold">COG Display Quality</label>
+                        <select id="raster-quality-select" class="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1.5 text-[11px] text-slate-300 focus:outline-none focus:border-indigo-500">
+                            <option value="128">Preview / Fast 128</option>
+                            <option value="256" selected>Sharp 256</option>
+                            <option value="384">High 384</option>
+                            <option value="512">Max Detail 512</option>
+                        </select>
+                        <p class="text-[9px] leading-relaxed text-slate-500">Higher values sample more pixels per map tile and improve visual detail at the cost of browser speed.</p>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-2 pt-1">
+                        <button id="btn-clear-raster-only" class="bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded px-2 py-1.5 flex items-center justify-center gap-1">
+                            <i data-lucide="eraser" class="w-3.5 h-3.5"></i> Clear Raster
+                        </button>
+                        <button id="btn-fit-raster" class="bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded px-2 py-1.5 flex items-center justify-center gap-1">
+                            <i data-lucide="focus" class="w-3.5 h-3.5"></i> Fit Raster
+                        </button>
+                    </div>
+                    <div id="active-raster-label" class="text-[9px] text-slate-500 font-mono truncate">No GeoTIFF loaded</div>
+                </div>
+            </div>
         </section>
 
     </main>
@@ -494,6 +539,11 @@
         let footprintGroup;
         let quicklookOverlayLayer = null;
         let activeGeoRasterLayer = null; // Track on-demand streamed GeoTIFF layer
+        let activeGeoRasterContext = null; // Raw parsed raster + stretch settings used for quality re-rendering
+        let footprintsLayerVisible = true;
+        let quicklookLayerVisible = false;
+        let geoTiffLayerVisible = true;
+        let rasterRenderResolution = 256;
         let selectedItem = null;
 
         // Leaflet Basemaps configuration
@@ -1041,6 +1091,151 @@
             return ok;
         }
 
+
+        function getRasterRenderResolution() {
+            const select = document.getElementById('raster-quality-select');
+            const selected = parseInt(select?.value || rasterRenderResolution || 256, 10);
+            return Number.isFinite(selected) && selected > 0 ? selected : 256;
+        }
+
+        function getRasterDisplayName(url) {
+            try {
+                const u = new URL(url);
+                const file = decodeURIComponent(u.pathname.split('/').pop() || 'GeoTIFF Raster');
+                return file || 'GeoTIFF Raster';
+            } catch (e) {
+                return 'GeoTIFF Raster';
+            }
+        }
+
+        function makeSarPixelColorFunction(georaster, stretch) {
+            return values => {
+                const val = Number(values[0]);
+                if (!Number.isFinite(val) || val === georaster.noDataValue) return null;
+
+                const displayValue = stretch.logScale ? Math.log10(Math.max(val, 1e-9)) : val;
+                let normalized = (displayValue - stretch.low) / (stretch.high - stretch.low);
+                normalized = Math.min(Math.max(normalized, 0), 1);
+                normalized = Math.pow(normalized, 0.72);
+                const byteVal = Math.min(Math.max(Math.round(normalized * 255), 0), 255);
+
+                return `rgba(${byteVal}, ${byteVal}, ${byteVal}, 1)`;
+            };
+        }
+
+        function createGeoRasterLeafletLayer(georaster, stretch) {
+            if (!window.GeoRasterLayer) {
+                throw new Error('GeoRasterLayer library failed to load. Check CDN/network access.');
+            }
+            return new GeoRasterLayer({
+                georaster,
+                pane: 'sarRasterPane',
+                opacity: document.getElementById('overlay-opacity')?.value / 100 || 0.7,
+                resolution: getRasterRenderResolution(),
+                updateWhenIdle: true,
+                updateWhenZooming: false,
+                keepBuffer: 2,
+                pixelValuesToColorFn: makeSarPixelColorFunction(georaster, stretch)
+            });
+        }
+
+        function setFootprintsLayerVisible(visible) {
+            footprintsLayerVisible = Boolean(visible);
+            const checkbox = document.getElementById('toggle-footprints-layer');
+            if (checkbox) checkbox.checked = footprintsLayerVisible;
+            if (map && footprintGroup) {
+                if (footprintsLayerVisible) {
+                    if (!map.hasLayer(footprintGroup)) footprintGroup.addTo(map);
+                } else if (map.hasLayer(footprintGroup)) {
+                    map.removeLayer(footprintGroup);
+                }
+            }
+            updateLayerControlPanel();
+        }
+
+        function setGeoTiffLayerVisible(visible) {
+            geoTiffLayerVisible = Boolean(visible);
+            const checkbox = document.getElementById('toggle-geotiff-layer');
+            if (checkbox) checkbox.checked = geoTiffLayerVisible;
+            if (map && activeGeoRasterLayer) {
+                if (geoTiffLayerVisible) {
+                    if (!map.hasLayer(activeGeoRasterLayer)) activeGeoRasterLayer.addTo(map);
+                } else if (map.hasLayer(activeGeoRasterLayer)) {
+                    map.removeLayer(activeGeoRasterLayer);
+                }
+            }
+            updateLayerControlPanel();
+        }
+
+        function setQuicklookLayerVisible(visible) {
+            quicklookLayerVisible = Boolean(visible);
+            const sidebarToggle = document.getElementById('overlay-map-toggle');
+            const panelToggle = document.getElementById('toggle-quicklook-layer');
+            if (panelToggle) panelToggle.checked = quicklookLayerVisible;
+            if (sidebarToggle) sidebarToggle.checked = quicklookLayerVisible;
+            toggleMapOverlay();
+            updateLayerControlPanel();
+        }
+
+        function rebuildActiveGeoRasterLayer({ fit = false, updateStatus = true } = {}) {
+            if (!map || !activeGeoRasterContext) return;
+            const wasVisible = geoTiffLayerVisible;
+            if (activeGeoRasterLayer && map.hasLayer(activeGeoRasterLayer)) {
+                map.removeLayer(activeGeoRasterLayer);
+            }
+            activeGeoRasterLayer = createGeoRasterLeafletLayer(activeGeoRasterContext.georaster, activeGeoRasterContext.stretch);
+            if (wasVisible) activeGeoRasterLayer.addTo(map);
+            if (fit && activeGeoRasterLayer.getBounds) {
+                map.fitBounds(activeGeoRasterLayer.getBounds(), { padding: [30, 30] });
+            }
+            if (updateStatus) {
+                document.getElementById('status-text').innerText = `GeoTIFF re-rendered at ${getRasterRenderResolution()} sample resolution`;
+            }
+            updateLayerControlPanel();
+        }
+
+        function updateLayerControlPanel() {
+            const status = document.getElementById('layer-control-status');
+            const rasterLabel = document.getElementById('active-raster-label');
+            const fitBtn = document.getElementById('btn-fit-raster');
+            const clearBtn = document.getElementById('btn-clear-raster-only');
+            const rasterToggle = document.getElementById('toggle-geotiff-layer');
+            const quicklookToggle = document.getElementById('toggle-quicklook-layer');
+            const footprintToggle = document.getElementById('toggle-footprints-layer');
+            const qualitySelect = document.getElementById('raster-quality-select');
+
+            if (footprintToggle) footprintToggle.checked = footprintsLayerVisible;
+            if (quicklookToggle) quicklookToggle.checked = quicklookLayerVisible;
+            if (rasterToggle) rasterToggle.checked = geoTiffLayerVisible;
+            if (qualitySelect) qualitySelect.value = String(getRasterRenderResolution());
+
+            const rasterLoaded = Boolean(activeGeoRasterContext && activeGeoRasterLayer);
+            if (fitBtn) fitBtn.disabled = !rasterLoaded;
+            if (clearBtn) clearBtn.disabled = !rasterLoaded;
+            if (rasterToggle) rasterToggle.disabled = !rasterLoaded;
+            if (rasterLabel) rasterLabel.innerText = rasterLoaded ? activeGeoRasterContext.title : 'No GeoTIFF loaded';
+            if (status) {
+                const fpCount = footprintGroup ? footprintGroup.getLayers().length : 0;
+                status.innerText = rasterLoaded ? `Raster ${getRasterRenderResolution()}` : `${fpCount} FP`;
+            }
+        }
+
+        function wireLayerControlPanel() {
+            document.getElementById('toggle-footprints-layer')?.addEventListener('change', e => setFootprintsLayerVisible(e.target.checked));
+            document.getElementById('toggle-quicklook-layer')?.addEventListener('change', e => setQuicklookLayerVisible(e.target.checked));
+            document.getElementById('toggle-geotiff-layer')?.addEventListener('change', e => setGeoTiffLayerVisible(e.target.checked));
+            document.getElementById('raster-quality-select')?.addEventListener('change', e => {
+                rasterRenderResolution = parseInt(e.target.value, 10) || 256;
+                if (activeGeoRasterContext) rebuildActiveGeoRasterLayer({ fit: false, updateStatus: true });
+                updateLayerControlPanel();
+            });
+            document.getElementById('btn-clear-raster-only')?.addEventListener('click', () => removeActiveGeoRaster(true));
+            document.getElementById('btn-fit-raster')?.addEventListener('click', () => {
+                if (activeGeoRasterLayer?.getBounds) map.fitBounds(activeGeoRasterLayer.getBounds(), { padding: [30, 30] });
+            });
+            updateLayerControlPanel();
+        }
+
         function showStartupFailure(title, error) {
             const message = error && error.message ? error.message : String(error || 'Unknown startup error');
             console.error(title, error);
@@ -1167,6 +1362,7 @@
                 if (activeGeoRasterLayer) activeGeoRasterLayer.setOpacity(this.value / 100);
             });
 
+            wireLayerControlPanel();
             setupSidebarTabs();
             setTimeout(() => map.invalidateSize(), 250);
 
@@ -1546,6 +1742,7 @@
             }
 
             updateLoadedItemsUIList();
+            updateLayerControlPanel();
         }
 
         // Re-populate platform options in filter automatically
@@ -2860,36 +3057,29 @@
 
                 const stretch = computeSarDisplayStretch(georaster);
 
-                // Create a Leaflet Canvas Raster Layer on-the-fly reprojected to EPSG:3857/Web Mercator
-                activeGeoRasterLayer = new GeoRasterLayer({
-                    georaster: georaster,
-                    pane: 'sarRasterPane',
-                    opacity: document.getElementById('overlay-opacity').value / 100,
-                    resolution: 128, // optimized grid size for browser performance
-                    pixelValuesToColorFn: values => {
-                        const val = Number(values[0]); // Single band SAR amplitude values
-                        if (!Number.isFinite(val) || val === georaster.noDataValue) return null; // Make background/margins transparent
+                // Create a Leaflet Canvas Raster Layer on-the-fly reprojected to EPSG:3857/Web Mercator.
+                // The display resolution is user-selectable in the Layer Controls panel.
+                activeGeoRasterContext = {
+                    georaster,
+                    stretch,
+                    tiffInfo,
+                    url,
+                    title: getRasterDisplayName(url)
+                };
+                activeGeoRasterLayer = createGeoRasterLeafletLayer(georaster, stretch);
 
-                        // SAR-friendly adaptive display: log10 percentile stretch + light gamma correction.
-                        const displayValue = stretch.logScale ? Math.log10(Math.max(val, 1e-9)) : val;
-                        let normalized = (displayValue - stretch.low) / (stretch.high - stretch.low);
-                        normalized = Math.min(Math.max(normalized, 0), 1);
-                        normalized = Math.pow(normalized, 0.72);
-                        const byteVal = Math.min(Math.max(Math.round(normalized * 255), 0), 255);
-
-                        return `rgba(${byteVal}, ${byteVal}, ${byteVal}, 1)`;
-                    }
-                });
-
-                // Render dynamically on basemap
-                activeGeoRasterLayer.addTo(map);
+                // Render dynamically on basemap if the GeoTIFF layer is enabled.
+                if (geoTiffLayerVisible) activeGeoRasterLayer.addTo(map);
 
                 // Auto-fit bounds to the exact raster footprint boundaries
                 map.fitBounds(activeGeoRasterLayer.getBounds(), { padding: [30, 30] });
 
                 // UI indicators
+                geoTiffLayerVisible = true;
+                document.getElementById('toggle-geotiff-layer') && (document.getElementById('toggle-geotiff-layer').checked = true);
                 document.getElementById('raster-layer-status').classList.remove('hidden');
-                document.getElementById('status-text').innerText = `${tiffInfo.tiffType} stream active`;
+                document.getElementById('status-text').innerText = `${tiffInfo.tiffType} stream active at ${getRasterRenderResolution()} sample resolution`;
+                updateLayerControlPanel();
 
                 btnElement.innerHTML = `<i data-lucide="check-circle" class="w-4 h-4 text-emerald-300"></i> Stream Live`;
                 refreshIcons();
@@ -2916,16 +3106,18 @@
                 }, 3000);
             }
         }
-        function removeActiveGeoRaster() {
+        function removeActiveGeoRaster(clearContext = true) {
             if (activeGeoRasterLayer) {
-                map.removeLayer(activeGeoRasterLayer);
+                if (map && map.hasLayer(activeGeoRasterLayer)) map.removeLayer(activeGeoRasterLayer);
                 activeGeoRasterLayer = null;
             }
+            if (clearContext) activeGeoRasterContext = null;
             document.getElementById('raster-layer-status').classList.add('hidden');
+            updateLayerControlPanel();
         }
 
 
-        // --- v1.3.7 UUID-first Umbra deliverables resolver override -------------------------------
+        // --- v1.3.8 UUID-first Umbra deliverables resolver override -------------------------------
         // The STAC date index lives under paths like stac/2025/2025-06/2025-06-10/<uuid>/...
         // The actual imagery lives under sar-data/tasks/<target path>/<collection-id>/<collect-folder>/.
         // These overrides prevent date-index folders from being treated as delivery folders and add a
@@ -3364,7 +3556,7 @@
             // Refresh Map Overlay configurations
             document.getElementById('overlay-map-toggle').checked = false;
             removeMapOverlay();
-            removeActiveGeoRaster();
+            // Keep loaded GeoTIFF visible when inspecting a different footprint; use Layer Controls or Clear Raster to remove it.
 
             // Highlight dynamic row in list panel
             updateLoadedItemsUIList();
@@ -3376,12 +3568,16 @@
             
             if (!toggleState) {
                 removeMapOverlay();
+                quicklookLayerVisible = false;
+                updateLayerControlPanel();
                 return;
             }
 
             if (!selectedItem || !selectedItem.geometry) {
                 notify("Overlay Error", "No spatial polygon geometry available on this footprint.");
                 document.getElementById('overlay-map-toggle').checked = false;
+                quicklookLayerVisible = false;
+                updateLayerControlPanel();
                 return;
             }
 
@@ -3403,6 +3599,8 @@
             if (!imageUrl) {
                 notify("Asset Error", "No valid image Quicklook preview URL located in this footprint's STAC assets.");
                 document.getElementById('overlay-map-toggle').checked = false;
+                quicklookLayerVisible = false;
+                updateLayerControlPanel();
                 return;
             }
 
@@ -3421,15 +3619,23 @@
                 zIndex: 500
             }).addTo(map);
 
+            quicklookLayerVisible = true;
             document.getElementById('status-text').innerText = "Quicklook Projected on Map";
+            updateLayerControlPanel();
         }
 
         // Wipe active Leaflet image projection layer
         function removeMapOverlay() {
             if (quicklookOverlayLayer) {
-                map.removeLayer(quicklookOverlayLayer);
+                if (map && map.hasLayer(quicklookOverlayLayer)) map.removeLayer(quicklookOverlayLayer);
                 quicklookOverlayLayer = null;
             }
+            quicklookLayerVisible = false;
+            const quicklookToggle = document.getElementById('toggle-quicklook-layer');
+            if (quicklookToggle) quicklookToggle.checked = false;
+            const sidebarToggle = document.getElementById('overlay-map-toggle');
+            if (sidebarToggle) sidebarToggle.checked = false;
+            updateLayerControlPanel();
         }
 
         // Apply interactive sidebar queries/filters
@@ -3477,6 +3683,7 @@
 
             document.getElementById('status-text').innerText = `Filter matches: ${filteredItems.length} of ${loadedItems.length}`;
             updateLoadedItemsUIList();
+            updateLayerControlPanel();
         }
 
         // Center map projection automatically to encompass all current layers
@@ -3491,8 +3698,10 @@
         // Standard Purge Routine
         function clearAllLoadedData() {
             removeMapOverlay();
-            removeActiveGeoRaster();
+            removeActiveGeoRaster(true);
             footprintGroup.clearLayers();
+            setFootprintsLayerVisible(true);
+            setGeoTiffLayerVisible(true);
             loadedItems = [];
             filteredItems = [];
             selectedItem = null;
@@ -3510,6 +3719,7 @@
             updateAnalyticsCharts();
             
             document.getElementById('status-text').innerText = "All footprints wiped.";
+            updateLayerControlPanel();
         }
 
         // Dynamic Chart Engine utilizing ChartJS
