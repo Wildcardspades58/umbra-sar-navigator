@@ -72,7 +72,7 @@
             <div>
                 <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
                     Umbra SAR Navigator 
-                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.12</span>
+                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.13</span>
                     <span class="text-xs bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded font-normal">Analyst Tool</span>
                 </h1>
                 <p class="text-xs text-slate-400">Interactive OpenStreetMap client for Umbra Space SpatioTemporal Asset Catalogs</p>
@@ -629,6 +629,18 @@
                         <p id="raster-scale-mode-note" class="text-[9px] leading-relaxed text-slate-500">Auto compares parsed COG bounds with the selected footprint. Severe scale mismatches use a rotated canvas-fit overlay that stretches the rendered pixels into the footprint and follows the footprint orientation when polygon corners are available.</p>
                     </div>
 
+                    <div class="border-t border-slate-800 pt-2 space-y-1.5">
+                        <label for="raster-orientation-select" class="block text-[10px] uppercase tracking-wider text-slate-500 font-bold">COG Canvas Orientation</label>
+                        <select id="raster-orientation-select" class="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1.5 text-[11px] text-slate-300 focus:outline-none focus:border-indigo-500">
+                            <option value="auto" selected>Auto: match raster long axis to footprint</option>
+                            <option value="0">0° / source orientation</option>
+                            <option value="90">Rotate pixels 90° clockwise</option>
+                            <option value="180">Rotate pixels 180°</option>
+                            <option value="270">Rotate pixels 270° clockwise</option>
+                        </select>
+                        <p id="raster-orientation-note" class="text-[9px] leading-relaxed text-slate-500">Use this if the canvas-fit raster is scaled and footprint-aligned but appears rotated by 90° or 180°.</p>
+                    </div>
+
                     <div class="grid grid-cols-2 gap-2 pt-1">
                         <button id="btn-clear-raster-only" class="bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded px-2 py-1.5 flex items-center justify-center gap-1">
                             <i data-lucide="eraser" class="w-3.5 h-3.5"></i> Clear Raster
@@ -680,6 +692,7 @@
         let geoTiffLayerVisible = true;
         let rasterRenderResolution = 256;
         let rasterBoundsMode = 'auto'; // native | auto | footprint. Auto corrects severe GeoTIFF-vs-STAC scale mismatches.
+        let rasterCanvasOrientationMode = 'auto'; // auto | 0 | 90 | 180 | 270. Corrects SAR pixel-axis orientation inside footprint-fit overlays.
         let selectedItem = null;
 
         // Leaflet Basemaps configuration
@@ -1586,6 +1599,72 @@
             return null;
         }
 
+        function getRasterCanvasOrientationMode() {
+            const select = document.getElementById('raster-orientation-select');
+            const value = String(select?.value || rasterCanvasOrientationMode || 'auto');
+            return ['auto', '0', '90', '180', '270'].includes(value) ? value : 'auto';
+        }
+
+        function latLngDistanceInLayerPixels(a, b) {
+            if (!map || !a || !b) return null;
+            const p1 = map.latLngToLayerPoint(a);
+            const p2 = map.latLngToLayerPoint(b);
+            const dist = p1.distanceTo(p2);
+            return Number.isFinite(dist) && dist > 0 ? dist : null;
+        }
+
+        function resolveCanvasOrientationDegrees(georaster, baseCanvasWidth, baseCanvasHeight) {
+            rasterCanvasOrientationMode = getRasterCanvasOrientationMode();
+            if (rasterCanvasOrientationMode !== 'auto') {
+                return { degrees: Number(rasterCanvasOrientationMode) || 0, source: 'manual' };
+            }
+
+            const cornerSet = getSelectedFootprintCornerSet();
+            const topEdge = cornerSet ? latLngDistanceInLayerPixels(cornerSet.topLeft, cornerSet.topRight) : null;
+            const leftEdge = cornerSet ? latLngDistanceInLayerPixels(cornerSet.topLeft, cornerSet.bottomLeft) : null;
+            if (!topEdge || !leftEdge || !baseCanvasWidth || !baseCanvasHeight) {
+                return { degrees: 0, source: 'auto-fallback' };
+            }
+
+            const rasterAspect = baseCanvasWidth / Math.max(baseCanvasHeight, 1);
+            const footprintAspect = topEdge / Math.max(leftEdge, 1);
+            const errorNoSwap = Math.abs(Math.log(rasterAspect / Math.max(footprintAspect, 1e-9)));
+            const errorSwap = Math.abs(Math.log((1 / Math.max(rasterAspect, 1e-9)) / Math.max(footprintAspect, 1e-9)));
+
+            if (errorSwap + 0.05 < errorNoSwap) {
+                return { degrees: 90, source: 'auto-long-axis', rasterAspect, footprintAspect };
+            }
+            return { degrees: 0, source: 'auto-long-axis', rasterAspect, footprintAspect };
+        }
+
+        function rotateCanvasForOrientation(baseCanvas, orientation) {
+            const degrees = ((Number(orientation?.degrees) || 0) % 360 + 360) % 360;
+            if (degrees === 0) return baseCanvas;
+
+            const out = document.createElement('canvas');
+            const ctx = out.getContext('2d', { willReadFrequently: false });
+            if (degrees === 90 || degrees === 270) {
+                out.width = baseCanvas.height;
+                out.height = baseCanvas.width;
+            } else {
+                out.width = baseCanvas.width;
+                out.height = baseCanvas.height;
+            }
+
+            if (degrees === 90) {
+                ctx.translate(out.width, 0);
+                ctx.rotate(Math.PI / 2);
+            } else if (degrees === 180) {
+                ctx.translate(out.width, out.height);
+                ctx.rotate(Math.PI);
+            } else if (degrees === 270) {
+                ctx.translate(0, out.height);
+                ctx.rotate(3 * Math.PI / 2);
+            }
+            ctx.drawImage(baseCanvas, 0, 0);
+            return out;
+        }
+
         function buildSarCanvasDataUrl(georaster, stretch) {
             const sourceWidth = Number(georaster.width || georaster.rasterWidth || 0);
             const sourceHeight = Number(georaster.height || georaster.rasterHeight || 0);
@@ -1626,12 +1705,22 @@
                 }
             }
             ctx.putImageData(img, 0, 0);
+
+            const orientation = resolveCanvasOrientationDegrees(georaster, canvasWidth, canvasHeight);
+            const orientedCanvas = rotateCanvasForOrientation(canvas, orientation);
+
             return {
-                url: canvas.toDataURL('image/png'),
-                width: canvasWidth,
-                height: canvasHeight,
+                url: orientedCanvas.toDataURL('image/png'),
+                width: orientedCanvas.width,
+                height: orientedCanvas.height,
+                baseWidth: canvasWidth,
+                baseHeight: canvasHeight,
                 sourceWidth,
-                sourceHeight
+                sourceHeight,
+                orientationDegrees: orientation.degrees,
+                orientationSource: orientation.source,
+                rasterAspect: orientation.rasterAspect,
+                footprintAspect: orientation.footprintAspect
             };
         }
 
@@ -1677,7 +1766,7 @@
         function createGeoRasterLeafletLayer(georaster, stretch, boundsAssessment = null) {
             const assessment = boundsAssessment || getRasterBoundsAssessment(georaster);
 
-            // Important v1.3.12 change:
+            // Important v1.3.13 change:
             // GeoRasterLayer can still use the parsed native coordinate grid internally even when a
             // `bounds` option is supplied. When the native area is wildly smaller/larger than the
             // selected STAC footprint, use a generated PNG ImageOverlay instead. That physically
@@ -1763,7 +1852,7 @@
             }
             updateGeoTiffDiagnostics(activeGeoRasterContext.georaster, activeGeoRasterContext.tiffInfo, activeGeoRasterContext.url, activeGeoRasterContext.boundsAssessment);
             if (updateStatus) {
-                document.getElementById('status-text').innerText = `GeoTIFF re-rendered at ${getRasterRenderResolution()} sample resolution · ${activeGeoRasterContext.boundsAssessment?.modeUsed || 'native'} bounds`;
+                document.getElementById('status-text').innerText = `GeoTIFF re-rendered at ${getRasterRenderResolution()} sample resolution · ${activeGeoRasterContext.boundsAssessment?.modeUsed || 'native'} bounds · canvas ${activeGeoRasterLayer?._umbraCanvasInfo?.orientationDegrees || 0}°`;
             }
             updateLayerControlPanel();
         }
@@ -1778,6 +1867,8 @@
             const footprintToggle = document.getElementById('toggle-footprints-layer');
             const qualitySelect = document.getElementById('raster-quality-select');
             const boundsSelect = document.getElementById('raster-bounds-mode-select');
+            const orientationSelect = document.getElementById('raster-orientation-select');
+            const orientationNote = document.getElementById('raster-orientation-note');
             const scaleNote = document.getElementById('raster-scale-mode-note');
 
             if (footprintToggle) footprintToggle.checked = footprintsLayerVisible;
@@ -1785,6 +1876,7 @@
             if (rasterToggle) rasterToggle.checked = geoTiffLayerVisible;
             if (qualitySelect) qualitySelect.value = String(getRasterRenderResolution());
             if (boundsSelect) boundsSelect.value = getRasterBoundsMode();
+            if (orientationSelect) orientationSelect.value = getRasterCanvasOrientationMode();
 
             const rasterLoaded = Boolean(activeGeoRasterContext && activeGeoRasterLayer);
             if (fitBtn) fitBtn.disabled = !rasterLoaded;
@@ -1794,10 +1886,16 @@
             if (scaleNote) scaleNote.innerText = rasterLoaded && activeGeoRasterContext.boundsAssessment
                 ? activeGeoRasterContext.boundsAssessment.note
                 : 'Auto compares parsed COG bounds with the selected footprint and corrects severe scale mismatches with a rotated footprint-fit canvas overlay when possible.';
+            if (orientationNote) {
+                const info = activeGeoRasterLayer?._umbraCanvasInfo;
+                orientationNote.innerText = info
+                    ? `Current canvas orientation: ${info.orientationDegrees || 0}° (${info.orientationSource || 'manual/auto'}). Change this if the raster is rotated 90°/180° inside the footprint.`
+                    : 'Use this if the canvas-fit raster is scaled and footprint-aligned but appears rotated by 90° or 180°.';
+            }
             if (status) {
                 const fpCount = footprintGroup ? footprintGroup.getLayers().length : 0;
                 const mode = activeGeoRasterContext?.boundsAssessment?.modeUsed || getRasterBoundsMode();
-                status.innerText = rasterLoaded ? `Raster ${getRasterRenderResolution()} · ${mode}${activeGeoRasterLayer?._umbraCanvasOverlay ? ' · canvas-fit' : ''}` : `${fpCount} FP`;
+                status.innerText = rasterLoaded ? `Raster ${getRasterRenderResolution()} · ${mode}${activeGeoRasterLayer?._umbraCanvasOverlay ? ` · canvas ${activeGeoRasterLayer?._umbraCanvasInfo?.orientationDegrees || 0}°` : ''}` : `${fpCount} FP`;
             }
         }
 
@@ -1812,6 +1910,11 @@
             });
             document.getElementById('raster-bounds-mode-select')?.addEventListener('change', e => {
                 rasterBoundsMode = getRasterBoundsMode();
+                if (activeGeoRasterContext) rebuildActiveGeoRasterLayer({ fit: true, updateStatus: true });
+                updateLayerControlPanel();
+            });
+            document.getElementById('raster-orientation-select')?.addEventListener('change', e => {
+                rasterCanvasOrientationMode = getRasterCanvasOrientationMode();
                 if (activeGeoRasterContext) rebuildActiveGeoRasterLayer({ fit: true, updateStatus: true });
                 updateLayerControlPanel();
             });
@@ -3611,9 +3714,16 @@
                 : '';
             const assessment = boundsAssessment || getRasterBoundsAssessment(georaster);
             const canvasInfo = activeGeoRasterLayer?._umbraCanvasOverlay && activeGeoRasterLayer?._umbraCanvasInfo
-                ? activeGeoRasterLayer?._umbraRotatedOverlay
-                    ? ` Render path: rotated footprint-fit canvas overlay (${activeGeoRasterLayer._umbraCanvasInfo.width}×${activeGeoRasterLayer._umbraCanvasInfo.height} display canvas from ${activeGeoRasterLayer._umbraCanvasInfo.sourceWidth}×${activeGeoRasterLayer._umbraCanvasInfo.sourceHeight} source pixels).`
-                    : ` Render path: footprint-fit canvas overlay (${activeGeoRasterLayer._umbraCanvasInfo.width}×${activeGeoRasterLayer._umbraCanvasInfo.height} display canvas from ${activeGeoRasterLayer._umbraCanvasInfo.sourceWidth}×${activeGeoRasterLayer._umbraCanvasInfo.sourceHeight} source pixels).`
+                ? (() => {
+                    const info = activeGeoRasterLayer._umbraCanvasInfo;
+                    const orientationText = ` Canvas orientation: ${info.orientationDegrees || 0}° ${info.orientationSource || 'manual/auto'}.`;
+                    const aspectText = Number.isFinite(info.rasterAspect) && Number.isFinite(info.footprintAspect)
+                        ? ` Aspect compare raster ${info.rasterAspect.toPrecision(4)} vs footprint ${info.footprintAspect.toPrecision(4)}.`
+                        : '';
+                    return activeGeoRasterLayer?._umbraRotatedOverlay
+                        ? ` Render path: rotated footprint-fit canvas overlay (${info.width}×${info.height} display canvas from ${info.sourceWidth}×${info.sourceHeight} source pixels).${orientationText}${aspectText}`
+                        : ` Render path: footprint-fit canvas overlay (${info.width}×${info.height} display canvas from ${info.sourceWidth}×${info.sourceHeight} source pixels).${orientationText}${aspectText}`;
+                })()
                 : ` Render path: GeoRasterLayer native tile grid.`;
             const scaleNote = assessment?.ratio
                 ? ` Scale mode: ${assessment.modeUsed}. Native/footprint area ratio ≈ ${assessment.ratio.toPrecision(5)}. ${assessment.note}${canvasInfo}`
