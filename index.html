@@ -72,7 +72,7 @@
             <div>
                 <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
                     Umbra SAR Navigator 
-                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.9</span>
+                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.10</span>
                     <span class="text-xs bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded font-normal">Analyst Tool</span>
                 </h1>
                 <p class="text-xs text-slate-400">Interactive OpenStreetMap client for Umbra Space SpatioTemporal Asset Catalogs</p>
@@ -619,6 +619,16 @@
                         <p class="text-[9px] leading-relaxed text-slate-500">Higher values sample more pixels per map tile and improve visual detail at the cost of browser speed.</p>
                     </div>
 
+                    <div class="border-t border-slate-800 pt-2 space-y-1.5">
+                        <label for="raster-bounds-mode-select" class="block text-[10px] uppercase tracking-wider text-slate-500 font-bold">COG Georeference / Scale Mode</label>
+                        <select id="raster-bounds-mode-select" class="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1.5 text-[11px] text-slate-300 focus:outline-none focus:border-indigo-500">
+                            <option value="auto" selected>Auto: use STAC footprint if scale looks wrong</option>
+                            <option value="native">Native GeoTIFF bounds</option>
+                            <option value="footprint">Force selected STAC footprint bounds</option>
+                        </select>
+                        <p id="raster-scale-mode-note" class="text-[9px] leading-relaxed text-slate-500">Auto compares parsed COG bounds with the selected footprint and corrects severe scale mismatches.</p>
+                    </div>
+
                     <div class="grid grid-cols-2 gap-2 pt-1">
                         <button id="btn-clear-raster-only" class="bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded px-2 py-1.5 flex items-center justify-center gap-1">
                             <i data-lucide="eraser" class="w-3.5 h-3.5"></i> Clear Raster
@@ -669,6 +679,7 @@
         let quicklookLayerVisible = false;
         let geoTiffLayerVisible = true;
         let rasterRenderResolution = 256;
+        let rasterBoundsMode = 'auto'; // native | auto | footprint. Auto corrects severe GeoTIFF-vs-STAC scale mismatches.
         let selectedItem = null;
 
         // Leaflet Basemaps configuration
@@ -1252,11 +1263,102 @@
             };
         }
 
-        function createGeoRasterLeafletLayer(georaster, stretch) {
+        function getSelectedFootprintBounds() {
+            if (!selectedItem || !selectedItem.geometry || !window.L) return null;
+            try {
+                if (selectedItem.mapLayer?.getBounds) return selectedItem.mapLayer.getBounds();
+                return L.geoJSON(selectedItem).getBounds();
+            } catch (err) {
+                console.warn('Unable to derive selected STAC footprint bounds.', err);
+                return null;
+            }
+        }
+
+        function latLngBoundsArea(bounds) {
+            if (!bounds || !bounds.isValid || !bounds.isValid()) return null;
+            const sw = bounds.getSouthWest();
+            const ne = bounds.getNorthEast();
+            const midLat = ((sw.lat + ne.lat) / 2) * Math.PI / 180;
+            const widthDeg = Math.abs(ne.lng - sw.lng) * Math.max(Math.cos(midLat), 0.000001);
+            const heightDeg = Math.abs(ne.lat - sw.lat);
+            const area = widthDeg * heightDeg;
+            return Number.isFinite(area) && area > 0 ? area : null;
+        }
+
+        function latLngBoundsFromGeoRasterNativeBounds(georaster) {
+            if (!window.L || !georaster) return null;
+            const xmin = Number(georaster.xmin);
+            const ymin = Number(georaster.ymin);
+            const xmax = Number(georaster.xmax);
+            const ymax = Number(georaster.ymax);
+            if (![xmin, ymin, xmax, ymax].every(Number.isFinite)) return null;
+
+            const projection = Number(georaster.projection);
+            try {
+                if (!projection || projection === 4326) {
+                    return L.latLngBounds([ymin, xmin], [ymax, xmax]);
+                }
+                if (projection === 3857) {
+                    const sw = L.CRS.EPSG3857.unproject(L.point(xmin, ymin));
+                    const ne = L.CRS.EPSG3857.unproject(L.point(xmax, ymax));
+                    return L.latLngBounds(sw, ne);
+                }
+                if (window.proj4) {
+                    const swCoord = proj4(`EPSG:${projection}`, 'EPSG:4326', [xmin, ymin]);
+                    const neCoord = proj4(`EPSG:${projection}`, 'EPSG:4326', [xmax, ymax]);
+                    if (swCoord && neCoord && swCoord.every(Number.isFinite) && neCoord.every(Number.isFinite)) {
+                        return L.latLngBounds([swCoord[1], swCoord[0]], [neCoord[1], neCoord[0]]);
+                    }
+                }
+            } catch (err) {
+                console.warn('Unable to estimate native GeoTIFF bounds in EPSG:4326.', err);
+            }
+            return null;
+        }
+
+        function getRasterBoundsMode() {
+            const select = document.getElementById('raster-bounds-mode-select');
+            const value = select?.value || rasterBoundsMode || 'auto';
+            return ['native', 'auto', 'footprint'].includes(value) ? value : 'auto';
+        }
+
+        function getRasterBoundsAssessment(georaster) {
+            rasterBoundsMode = getRasterBoundsMode();
+            const footprintBounds = getSelectedFootprintBounds();
+            const nativeBounds = latLngBoundsFromGeoRasterNativeBounds(georaster);
+            const footprintArea = latLngBoundsArea(footprintBounds);
+            const nativeArea = latLngBoundsArea(nativeBounds);
+            const ratio = (nativeArea && footprintArea) ? nativeArea / footprintArea : null;
+            const severeMismatch = Number.isFinite(ratio) && (ratio < 0.05 || ratio > 20);
+            let recommendedBounds = null;
+            let modeUsed = 'native';
+            let note = 'Using native GeoTIFF bounds.';
+
+            if (rasterBoundsMode === 'footprint') {
+                recommendedBounds = footprintBounds;
+                modeUsed = recommendedBounds ? 'footprint' : 'native';
+                note = recommendedBounds ? 'Forced to selected STAC footprint bounds.' : 'No selected footprint was available; using native GeoTIFF bounds.';
+            } else if (rasterBoundsMode === 'auto' && severeMismatch && footprintBounds) {
+                recommendedBounds = footprintBounds;
+                modeUsed = 'auto-footprint';
+                const prettyRatio = ratio < 1 ? `1:${Math.round(1 / ratio).toLocaleString()}` : `${ratio.toFixed(1)}:1`;
+                note = `Auto scale correction applied. Parsed GeoTIFF footprint/selected STAC footprint area ratio ≈ ${prettyRatio}.`;
+            } else if (rasterBoundsMode === 'auto') {
+                modeUsed = 'auto-native';
+                note = Number.isFinite(ratio)
+                    ? `Auto kept native GeoTIFF bounds. Area ratio vs selected footprint ≈ ${ratio.toPrecision(4)}.`
+                    : 'Auto kept native GeoTIFF bounds because a selected footprint comparison was unavailable.';
+            }
+
+            return { footprintBounds, nativeBounds, footprintArea, nativeArea, ratio, severeMismatch, recommendedBounds, modeUsed, note };
+        }
+
+        function createGeoRasterLeafletLayer(georaster, stretch, boundsAssessment = null) {
             if (!window.GeoRasterLayer) {
                 throw new Error('GeoRasterLayer library failed to load. Check CDN/network access.');
             }
-            return new GeoRasterLayer({
+            const assessment = boundsAssessment || getRasterBoundsAssessment(georaster);
+            const layerOptions = {
                 georaster,
                 pane: 'sarRasterPane',
                 opacity: document.getElementById('overlay-opacity')?.value / 100 || 0.7,
@@ -1265,7 +1367,13 @@
                 updateWhenZooming: false,
                 keepBuffer: 2,
                 pixelValuesToColorFn: makeSarPixelColorFunction(georaster, stretch)
-            });
+            };
+            if (assessment?.recommendedBounds) {
+                layerOptions.bounds = assessment.recommendedBounds;
+            }
+            const layer = new GeoRasterLayer(layerOptions);
+            layer._umbraBoundsAssessment = assessment;
+            return layer;
         }
 
         function setFootprintsLayerVisible(visible) {
@@ -1312,13 +1420,15 @@
             if (activeGeoRasterLayer && map.hasLayer(activeGeoRasterLayer)) {
                 map.removeLayer(activeGeoRasterLayer);
             }
-            activeGeoRasterLayer = createGeoRasterLeafletLayer(activeGeoRasterContext.georaster, activeGeoRasterContext.stretch);
+            activeGeoRasterContext.boundsAssessment = getRasterBoundsAssessment(activeGeoRasterContext.georaster);
+            activeGeoRasterLayer = createGeoRasterLeafletLayer(activeGeoRasterContext.georaster, activeGeoRasterContext.stretch, activeGeoRasterContext.boundsAssessment);
             if (wasVisible) activeGeoRasterLayer.addTo(map);
             if (fit && activeGeoRasterLayer.getBounds) {
                 map.fitBounds(activeGeoRasterLayer.getBounds(), { padding: [30, 30] });
             }
+            updateGeoTiffDiagnostics(activeGeoRasterContext.georaster, activeGeoRasterContext.tiffInfo, activeGeoRasterContext.url, activeGeoRasterContext.boundsAssessment);
             if (updateStatus) {
-                document.getElementById('status-text').innerText = `GeoTIFF re-rendered at ${getRasterRenderResolution()} sample resolution`;
+                document.getElementById('status-text').innerText = `GeoTIFF re-rendered at ${getRasterRenderResolution()} sample resolution · ${activeGeoRasterContext.boundsAssessment?.modeUsed || 'native'} bounds`;
             }
             updateLayerControlPanel();
         }
@@ -1332,20 +1442,27 @@
             const quicklookToggle = document.getElementById('toggle-quicklook-layer');
             const footprintToggle = document.getElementById('toggle-footprints-layer');
             const qualitySelect = document.getElementById('raster-quality-select');
+            const boundsSelect = document.getElementById('raster-bounds-mode-select');
+            const scaleNote = document.getElementById('raster-scale-mode-note');
 
             if (footprintToggle) footprintToggle.checked = footprintsLayerVisible;
             if (quicklookToggle) quicklookToggle.checked = quicklookLayerVisible;
             if (rasterToggle) rasterToggle.checked = geoTiffLayerVisible;
             if (qualitySelect) qualitySelect.value = String(getRasterRenderResolution());
+            if (boundsSelect) boundsSelect.value = getRasterBoundsMode();
 
             const rasterLoaded = Boolean(activeGeoRasterContext && activeGeoRasterLayer);
             if (fitBtn) fitBtn.disabled = !rasterLoaded;
             if (clearBtn) clearBtn.disabled = !rasterLoaded;
             if (rasterToggle) rasterToggle.disabled = !rasterLoaded;
             if (rasterLabel) rasterLabel.innerText = rasterLoaded ? activeGeoRasterContext.title : 'No GeoTIFF loaded';
+            if (scaleNote) scaleNote.innerText = rasterLoaded && activeGeoRasterContext.boundsAssessment
+                ? activeGeoRasterContext.boundsAssessment.note
+                : 'Auto compares parsed COG bounds with the selected footprint and corrects severe scale mismatches.';
             if (status) {
                 const fpCount = footprintGroup ? footprintGroup.getLayers().length : 0;
-                status.innerText = rasterLoaded ? `Raster ${getRasterRenderResolution()}` : `${fpCount} FP`;
+                const mode = activeGeoRasterContext?.boundsAssessment?.modeUsed || getRasterBoundsMode();
+                status.innerText = rasterLoaded ? `Raster ${getRasterRenderResolution()} · ${mode}` : `${fpCount} FP`;
             }
         }
 
@@ -1356,6 +1473,11 @@
             document.getElementById('raster-quality-select')?.addEventListener('change', e => {
                 rasterRenderResolution = parseInt(e.target.value, 10) || 256;
                 if (activeGeoRasterContext) rebuildActiveGeoRasterLayer({ fit: false, updateStatus: true });
+                updateLayerControlPanel();
+            });
+            document.getElementById('raster-bounds-mode-select')?.addEventListener('change', e => {
+                rasterBoundsMode = getRasterBoundsMode();
+                if (activeGeoRasterContext) rebuildActiveGeoRasterLayer({ fit: true, updateStatus: true });
                 updateLayerControlPanel();
             });
             document.getElementById('btn-clear-raster-only')?.addEventListener('click', () => removeActiveGeoRaster(true));
@@ -3119,7 +3241,7 @@
             }
         }
 
-        function updateGeoTiffDiagnostics(georaster, tiffInfo, url) {
+        function updateGeoTiffDiagnostics(georaster, tiffInfo, url, boundsAssessment = null) {
             const status = document.getElementById('geotiff-diagnostics-status');
             if (status) {
                 status.innerText = 'Loaded';
@@ -3152,7 +3274,11 @@
             const crsNote = georaster?.projection && ![4326, 3857].includes(Number(georaster.projection))
                 ? ` CRS EPSG:${georaster.projection} requires browser reprojection through proj4/georaster-layer-for-leaflet.`
                 : '';
-            safeSetText('diag-raster-georef', `${rotationWarning}${crsNote} Source: ${getRasterDisplayName(url)}`);
+            const assessment = boundsAssessment || getRasterBoundsAssessment(georaster);
+            const scaleNote = assessment?.ratio
+                ? ` Scale mode: ${assessment.modeUsed}. Native/footprint area ratio ≈ ${assessment.ratio.toPrecision(5)}. ${assessment.note}`
+                : ` Scale mode: ${assessment?.modeUsed || getRasterBoundsMode()}. ${assessment?.note || ''}`;
+            safeSetText('diag-raster-georef', `${rotationWarning}${crsNote} ${scaleNote} Source: ${getRasterDisplayName(url)}`);
         }
 
         function clearGeoTiffDiagnostics() {
@@ -3239,15 +3365,17 @@
 
                 // Create a Leaflet Canvas Raster Layer on-the-fly reprojected to EPSG:3857/Web Mercator.
                 // The display resolution is user-selectable in the Layer Controls panel.
+                const boundsAssessment = getRasterBoundsAssessment(georaster);
                 activeGeoRasterContext = {
                     georaster,
                     stretch,
                     tiffInfo,
                     url,
-                    title: getRasterDisplayName(url)
+                    title: getRasterDisplayName(url),
+                    boundsAssessment
                 };
-                activeGeoRasterLayer = createGeoRasterLeafletLayer(georaster, stretch);
-                updateGeoTiffDiagnostics(georaster, tiffInfo, url);
+                activeGeoRasterLayer = createGeoRasterLeafletLayer(georaster, stretch, boundsAssessment);
+                updateGeoTiffDiagnostics(georaster, tiffInfo, url, boundsAssessment);
 
                 // Render dynamically on basemap if the GeoTIFF layer is enabled.
                 if (geoTiffLayerVisible) activeGeoRasterLayer.addTo(map);
@@ -3259,7 +3387,7 @@
                 geoTiffLayerVisible = true;
                 document.getElementById('toggle-geotiff-layer') && (document.getElementById('toggle-geotiff-layer').checked = true);
                 document.getElementById('raster-layer-status').classList.remove('hidden');
-                document.getElementById('status-text').innerText = `${tiffInfo.tiffType} stream active at ${getRasterRenderResolution()} sample resolution`;
+                document.getElementById('status-text').innerText = `${tiffInfo.tiffType} stream active at ${getRasterRenderResolution()} samples · ${boundsAssessment.modeUsed} bounds`;
                 updateLayerControlPanel();
 
                 btnElement.innerHTML = `<i data-lucide="check-circle" class="w-4 h-4 text-emerald-300"></i> Stream Live`;
