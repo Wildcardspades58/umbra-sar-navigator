@@ -394,7 +394,10 @@
 
                         <!-- Data Assets Download Links -->
                         <div class="bg-slate-950 rounded-xl p-4 border border-slate-800 space-y-2.5">
-                            <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 font-semibold text-slate-300">Available SAR Deliverables</h3>
+                            <div class="flex items-center justify-between gap-2">
+                                <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 font-semibold text-slate-300">Available SAR Deliverables</h3>
+                                <span class="text-[9px] bg-slate-900 text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded font-mono">STAC + AWS</span>
+                            </div>
                             <div id="detail-assets-list" class="space-y-2">
                                 <!-- Assets buttons are appended here -->
                             </div>
@@ -585,6 +588,45 @@
             return extensions.some(ext => pathname.endsWith(ext));
         }
 
+        function escapeHtml(value) {
+            return String(value ?? "").replace(/[&<>"']/g, ch => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[ch]));
+        }
+
+        function getObjectFileName(pathname) {
+            const cleanPath = String(pathname || "").split('/').pop() || "asset";
+            return cleanPath || "asset";
+        }
+
+        function getCompoundExtension(pathname) {
+            const name = getObjectFileName(pathname).toLowerCase();
+            if (name.endsWith('.crsd.zip')) return '.crsd.zip';
+            if (name.endsWith('.cphd.zip')) return '.cphd.zip';
+            const match = name.match(/\.[a-z0-9]+$/i);
+            return match ? match[0] : '.bin';
+        }
+
+        function getMimeTypeLabel(asset) {
+            const rawType = String(asset?.type || "").trim();
+            if (!rawType) return "TYPE UNKNOWN";
+            if (rawType.includes('/')) return rawType.split('/').pop().toUpperCase();
+            return rawType.toUpperCase();
+        }
+
+        function guessMimeTypeFromProduct(productCode, extension) {
+            const ext = String(extension || '').toLowerCase();
+            if (productCode === 'GEC' || productCode === 'CSI TIFF' || ext === '.tif' || ext === '.tiff') return 'image/tiff; application=geotiff';
+            if (productCode === 'SICD' || productCode === 'SIDD' || ext === '.nitf' || ext === '.ntf') return 'image/nitf';
+            if (productCode === 'CPHD' || ext === '.cphd') return 'application/octet-stream';
+            if (productCode === 'CRSD' || ext === '.crsd.zip') return 'application/zip';
+            if (ext === '.gif') return 'image/gif';
+            if (ext === '.png') return 'image/png';
+            if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+            if (ext === '.json' || ext === '.geojson') return 'application/json';
+            return 'application/octet-stream';
+        }
+
         // Classify STAC assets by the resolved object pathname first. This prevents false positives such as "identifier" or mislabeled JSON assets.
         function classifyStacAsset(key, asset, sourceUrl) {
             const href = String(asset?.href || "");
@@ -592,14 +634,22 @@
             const lowerKey = String(key || "").toLowerCase();
             const absoluteUrl = translateS3Url(href, sourceUrl);
             const pathname = getAssetPathname(absoluteUrl);
+            const fileName = getObjectFileName(pathname);
+            const fileNameLower = fileName.toLowerCase();
+            const extension = getCompoundExtension(pathname);
+            const haystack = `${lowerKey} ${String(asset?.title || '').toLowerCase()} ${String(asset?.description || '').toLowerCase()} ${pathname}`;
 
             const isJson = hasStrictExtension(pathname, ['.json', '.geojson']) || lowerKey === 'gjd' || type.includes('json');
             const isNitf = hasStrictExtension(pathname, ['.nitf', '.ntf']) || lowerKey === 'sicd' || lowerKey === 'sidd' || type.includes('nitf');
+            const isCphd = extension === '.cphd' || fileNameLower.endsWith('.cphd.zip') || haystack.includes('cphd');
+            const isCrsd = fileNameLower.endsWith('.crsd.zip') || haystack.includes('crsd');
             const isHtmlViewer = hasStrictExtension(pathname, ['.html', '.htm']) || absoluteUrl.includes('?prefix=') || absoluteUrl.includes('s3-website');
 
             // GeoTIFF stream buttons are ONLY allowed for real object paths ending in .tif/.tiff.
             // Do not use key-name substring checks or MIME checks here; those caused the invalid-byte-order failures.
             const isGeoTiff = !isJson && !isNitf && !isHtmlViewer && hasStrictExtension(pathname, ['.tif', '.tiff']);
+            const isGecTiff = isGeoTiff && (/(^|[^a-z])(gec|ged)([^a-z]|$)/i.test(haystack) || lowerKey === 'gec' || lowerKey === 'ged');
+            const isCsiTiff = isGeoTiff && (haystack.includes('csi') || haystack.includes('color single image'));
 
             const isPreviewImage = !isJson && !isNitf && !isGeoTiff && !isHtmlViewer && (
                 hasStrictExtension(pathname, ['.png', '.jpg', '.jpeg', '.webp']) ||
@@ -610,18 +660,39 @@
                 lowerKey === 'rendered_preview'
             );
 
-            let extension = ".bin";
-            const match = pathname.match(/\.[a-z0-9]+$/i);
-            if (match) extension = match[0];
+            let productCode = 'DATA';
+            if (isJson && (fileNameLower.endsWith('stac.v2.json') || haystack.includes('stac'))) productCode = 'STAC METADATA';
+            else if (isJson) productCode = lowerKey === 'gjd' ? 'GJD METADATA' : 'METADATA';
+            else if (isCphd) productCode = 'CPHD';
+            else if (isCrsd) productCode = 'CRSD';
+            else if (isNitf && (lowerKey === 'sicd' || haystack.includes('sicd'))) productCode = 'SICD';
+            else if (isNitf && (lowerKey === 'sidd' || haystack.includes('sidd'))) productCode = 'SIDD';
+            else if (isNitf) productCode = 'NITF';
+            else if (isGecTiff) productCode = 'GEC';
+            else if (isCsiTiff) productCode = 'CSI TIFF';
+            else if (isGeoTiff) productCode = 'GEOTIFF';
+            else if (extension === '.gif') productCode = 'DI GIF';
+            else if (isPreviewImage) productCode = 'QUICKLOOK';
+
+            // Per Umbra's product guide, GEC is delivered as a TIF. Treat it as the primary browser-streamable COG candidate.
+            // If the catalog used a GED key/name by typo, accept it as the same streamable GEC-style GeoTIFF.
+            const isStreamableCog = isGeoTiff && (productCode === 'GEC' || productCode === 'GEOTIFF' || productCode === 'CSI TIFF');
 
             return {
                 absoluteUrl,
                 pathname,
+                fileName,
                 isJson,
                 isNitf,
                 isHtmlViewer,
                 isGeoTiff,
+                isGecTiff,
+                isCsiTiff,
+                isCphd,
+                isCrsd,
                 isPreviewImage,
+                isStreamableCog,
+                productCode,
                 extension
             };
         }
@@ -1235,48 +1306,394 @@
             lucide.createIcons();
         }
 
-        // Helper mapper to explain SAR format structures clearly in details list
-        function getAssetFriendlyInfo(key, asset, isGeoTiff, isJson, isNitf) {
-            const lowerKey = String(key).toLowerCase();
-            
-            let label = asset.title || key;
-            let description = "Direct Data Stream";
+        // Helper mapper to explain SAR format structures clearly in details list.
+        // The classification object is derived from the actual resolved AWS object path, not from unreliable STAC MIME labels alone.
+        function getAssetFriendlyInfo(key, asset, classification) {
+            const product = classification.productCode;
+            const ext = classification.extension.replace(/^\./, '').toUpperCase();
+            const fileName = classification.fileName || key;
+
+            let label = asset.title || fileName || key;
+            let description = "Direct AWS S3 object from this STAC Item";
             let icon = "file-down";
             let badgeColor = "bg-indigo-950 text-indigo-300 border border-indigo-900/30";
 
-            if (isJson || lowerKey === 'gjd') {
-                label = String(key).toUpperCase() + " Metadata";
-                description = "JSON text parameters containing target telemetry";
+            if (product === 'STAC METADATA' || product === 'METADATA' || product === 'GJD METADATA') {
+                label = product === 'GJD METADATA' ? "GJD Metadata JSON" : "Collection Metadata JSON";
+                description = "Text metadata from the STAC/Umbra delivery package";
                 icon = "braces";
                 badgeColor = "bg-amber-950/40 text-amber-400 border border-amber-500/20";
-            } else if (lowerKey === 'sicd' || (isNitf && lowerKey.includes('sicd'))) {
-                label = "Sensor Independent Coherent Data (SICD)";
-                description = "Raw complex raster container (NITF format) — Stream/Drag to QGIS";
+            } else if (product === 'CPHD') {
+                label = "CPHD Radar Echo Data";
+                description = "Compensated phase history data — specialist SAR processing input";
+                icon = "binary";
+                badgeColor = "bg-fuchsia-950/40 text-fuchsia-300 border border-fuchsia-500/20";
+            } else if (product === 'CRSD') {
+                label = "CRSD Radar Signal Data";
+                description = "Compensated receive signal data archive";
+                icon = "archive";
+                badgeColor = "bg-fuchsia-950/40 text-fuchsia-300 border border-fuchsia-500/20";
+            } else if (product === 'SICD') {
+                label = "SICD NITF";
+                description = "Sensor Independent Complex Data — not browser-renderable; use QGIS/GDAL/SarPy";
                 icon = "binary";
                 badgeColor = "bg-emerald-950/40 text-emerald-400 border border-emerald-500/20";
-            } else if (lowerKey === 'sidd' || (isNitf && lowerKey.includes('sidd'))) {
-                label = "Sensor Independent Derived Data (SIDD)";
-                description = "Detected amplitude raster container (NITF format) — Stream/Drag to QGIS";
+            } else if (product === 'SIDD') {
+                label = "SIDD NITF";
+                description = "Sensor Independent Detected Data — not streamed in this browser canvas";
                 icon = "image";
                 badgeColor = "bg-emerald-950/40 text-emerald-400 border border-emerald-500/20";
-            } else if (isNitf) {
-                label = "Raw NITF Raster";
-                description = "Military/Intelligence raster container — Load in QGIS";
+            } else if (product === 'NITF') {
+                label = "NITF Raster";
+                description = "NITF container — available for download/copy, not browser COG streaming";
                 icon = "binary";
                 badgeColor = "bg-emerald-950/40 text-emerald-400 border border-emerald-500/20";
-            } else if (isGeoTiff || lowerKey === 'gec') {
-                label = "GeoTIFF Image Raster";
-                description = "Standard GIS imagery band — Stream directly to canvas / QGIS";
+            } else if (product === 'GEC') {
+                label = "GEC GeoTIFF (.tif)";
+                description = "Geocoded Ellipsoid Corrected COG — stream directly onto the Leaflet map";
+                icon = "monitor-play";
+                badgeColor = "bg-indigo-600/30 text-indigo-200 border border-indigo-400/40";
+            } else if (product === 'CSI TIFF') {
+                label = "CSI TIFF (.tif)";
+                description = "Color Single Image TIFF — streamable GeoTIFF/COG when valid";
                 icon = "image";
-                badgeColor = "bg-emerald-950/40 text-emerald-400 border border-emerald-500/20";
-            } else if (lowerKey === 'rendered_preview' || lowerKey === 'thumbnail') {
+                badgeColor = "bg-cyan-950/40 text-cyan-300 border border-cyan-500/20";
+            } else if (product === 'GEOTIFF') {
+                label = "GeoTIFF / COG (.tif)";
+                description = "TIFF raster discovered from the AWS object path — streamable after byte validation";
+                icon = "monitor-play";
+                badgeColor = "bg-indigo-600/30 text-indigo-200 border border-indigo-400/40";
+            } else if (product === 'DI GIF') {
+                label = "DI GIF Movie";
+                description = "SAR movie / dwell imagery product";
+                icon = "film";
+                badgeColor = "bg-blue-950/40 text-blue-400 border border-blue-500/20";
+            } else if (product === 'QUICKLOOK') {
                 label = "Quicklook Preview Image";
-                description = "Processed PNG used for in-map canvas projection overlays";
+                description = "Preview image used for thumbnail and optional map overlay";
                 icon = "eye";
                 badgeColor = "bg-blue-950/40 text-blue-400 border border-blue-500/20";
             }
 
-            return { label, description, icon, badgeColor };
+            const typeBadge = product === 'DATA' ? ext : `${product} ${ext}`.trim();
+            return { label, description, icon, badgeColor, typeBadge };
+        }
+
+        function parseS3ObjectUrl(url) {
+            const u = safeUrlObject(url);
+            if (!u) return null;
+
+            const virtualHosted = u.hostname.match(/^(.+?)\.s3[.-]([a-z0-9-]+)\.amazonaws\.com$/i);
+            if (virtualHosted) {
+                const key = decodeURIComponent(u.pathname.replace(/^\/+/, ''));
+                if (!key) return null;
+                return { bucket: virtualHosted[1], region: virtualHosted[2] || 'us-west-2', key };
+            }
+
+            const pathStyle = u.hostname.match(/^s3[.-]([a-z0-9-]+)\.amazonaws\.com$/i);
+            if (pathStyle) {
+                const parts = decodeURIComponent(u.pathname.replace(/^\/+/, '')).split('/');
+                const bucket = parts.shift();
+                const key = parts.join('/');
+                if (!bucket || !key) return null;
+                return { bucket, region: pathStyle[1] || 'us-west-2', key };
+            }
+
+            return null;
+        }
+
+        function getS3ObjectUrl(bucket, region, key) {
+            return `https://${bucket}.s3.${region || 'us-west-2'}.amazonaws.com/${String(key || '').split('/').map(encodeURIComponent).join('/')}`;
+        }
+
+        function getS3DirectoryPrefixesForItem(item) {
+            const urls = [];
+            if (item?.assets) {
+                Object.values(item.assets).forEach(asset => {
+                    if (asset?.href) urls.push(translateS3Url(asset.href, item.sourceUrl));
+                });
+            }
+            if (item?.sourceUrl) urls.push(translateS3Url(item.sourceUrl, item.sourceUrl));
+
+            const prefixMap = new Map();
+            urls.forEach(url => {
+                const parsed = parseS3ObjectUrl(url);
+                if (!parsed || !parsed.key || !parsed.key.includes('/')) return;
+                const prefix = parsed.key.split('/').slice(0, -1).join('/') + '/';
+                // Do not list the bucket root or broad STAC index folders; only sibling folders close to the selected image.
+                if (!prefix || prefix === '/' || prefix === 'stac/' || prefix.split('/').length < 2) return;
+                const id = `${parsed.bucket}|${parsed.region}|${prefix}`;
+                prefixMap.set(id, { bucket: parsed.bucket, region: parsed.region, prefix });
+            });
+            return Array.from(prefixMap.values()).slice(0, 6);
+        }
+
+        async function listS3PrefixObjects(bucket, region, prefix) {
+            const params = new URLSearchParams({ 'list-type': '2', prefix, 'max-keys': '1000' });
+            const listUrl = `https://${bucket}.s3.${region || 'us-west-2'}.amazonaws.com/?${params.toString()}`;
+            const response = await fetch(listUrl, { cache: 'no-store' });
+            if (!response.ok) throw new Error(`S3 list failed with HTTP ${response.status}`);
+            const xmlText = await response.text();
+            const xml = new DOMParser().parseFromString(xmlText, 'application/xml');
+            const errorNode = xml.querySelector('Error Code');
+            if (errorNode) throw new Error(`S3 list error: ${errorNode.textContent || 'Unknown error'}`);
+
+            return Array.from(xml.querySelectorAll('Contents')).map(node => {
+                const key = node.querySelector('Key')?.textContent || '';
+                const size = parseInt(node.querySelector('Size')?.textContent || '0', 10);
+                return { key, size, url: getS3ObjectUrl(bucket, region, key) };
+            }).filter(obj => obj.key && obj.size > 0);
+        }
+
+        function shouldDisplayS3Object(pathname) {
+            return hasStrictExtension(pathname, [
+                '.tif', '.tiff', '.nitf', '.ntf', '.json', '.geojson', '.cphd', '.gif', '.png', '.jpg', '.jpeg', '.webp', '.zip'
+            ]) || pathname.endsWith('.crsd.zip') || pathname.endsWith('.cphd.zip');
+        }
+
+        function makeDiscoveredAssetKey(key) {
+            const base = getObjectFileName(key).replace(/\.[^.]+$/i, '') || 'asset';
+            return `s3_${base}`.replace(/[^a-zA-Z0-9_\-]+/g, '_').slice(0, 80);
+        }
+
+        function makeUniqueAssetKey(assets, desiredKey) {
+            let key = desiredKey;
+            let idx = 2;
+            while (Object.prototype.hasOwnProperty.call(assets, key)) {
+                key = `${desiredKey}_${idx++}`;
+            }
+            return key;
+        }
+
+        async function reconcileStacAssetsWithS3(item) {
+            if (!item || item._s3DeliverablesReconciled) return 0;
+            item._s3DeliverablesReconciled = true;
+            item.assets = item.assets || {};
+
+            const prefixes = getS3DirectoryPrefixesForItem(item);
+            if (prefixes.length === 0) return 0;
+
+            const existingUrls = new Set(Object.values(item.assets).map(asset => translateS3Url(asset.href, item.sourceUrl)));
+            let added = 0;
+
+            for (const entry of prefixes) {
+                try {
+                    const objects = await listS3PrefixObjects(entry.bucket, entry.region, entry.prefix);
+                    for (const obj of objects) {
+                        const pathname = getAssetPathname(obj.url);
+                        if (!shouldDisplayS3Object(pathname)) continue;
+                        if (existingUrls.has(obj.url)) continue;
+
+                        const temporaryAsset = { href: obj.url, title: getObjectFileName(pathname) };
+                        const classification = classifyStacAsset(makeDiscoveredAssetKey(obj.key), temporaryAsset, item.sourceUrl);
+                        const assetKey = makeUniqueAssetKey(item.assets, makeDiscoveredAssetKey(obj.key));
+                        const productLabel = classification.productCode === 'DATA' ? classification.extension.replace(/^\./, '').toUpperCase() : classification.productCode;
+
+                        item.assets[assetKey] = {
+                            href: obj.url,
+                            title: `${productLabel} — ${classification.fileName}`,
+                            type: guessMimeTypeFromProduct(classification.productCode, classification.extension),
+                            roles: ['data'],
+                            description: `Discovered from AWS S3 sibling objects for this STAC Item (${formatBytes(obj.size)}).`,
+                            _discoveredFromS3: true,
+                            _sizeBytes: obj.size
+                        };
+                        existingUrls.add(obj.url);
+                        added++;
+                    }
+                } catch (e) {
+                    console.warn('S3 deliverable reconciliation skipped for prefix:', entry.prefix, e);
+                }
+            }
+
+            return added;
+        }
+
+        function getDeliverableSortWeight(classification) {
+            const order = {
+                'GEC': 0,
+                'GEOTIFF': 1,
+                'CSI TIFF': 2,
+                'QUICKLOOK': 3,
+                'SIDD': 4,
+                'SICD': 5,
+                'CPHD': 6,
+                'CRSD': 7,
+                'STAC METADATA': 8,
+                'GJD METADATA': 9,
+                'METADATA': 10,
+                'NITF': 11,
+                'DI GIF': 12,
+                'DATA': 20
+            };
+            return order[classification.productCode] ?? 20;
+        }
+
+        function getDeliverableEntries(item) {
+            return Object.entries(item.assets || {})
+                .map(([key, asset]) => ({ key, asset, classification: classifyStacAsset(key, asset, item.sourceUrl) }))
+                .filter(entry => entry.classification.absoluteUrl)
+                .sort((a, b) => {
+                    const aWeight = getDeliverableSortWeight(a.classification);
+                    const bWeight = getDeliverableSortWeight(b.classification);
+                    if (aWeight !== bWeight) return aWeight - bWeight;
+                    return a.classification.fileName.localeCompare(b.classification.fileName);
+                });
+        }
+
+        function wireDeliverableActionButtons(container) {
+            container.querySelectorAll('.stream-raster-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    streamGeoTiffToMap(btn.getAttribute('data-url'), btn);
+                });
+            });
+
+            container.querySelectorAll('.copy-url-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    const url = btn.getAttribute('data-url');
+                    try {
+                        if (navigator.clipboard?.writeText) {
+                            await navigator.clipboard.writeText(url);
+                        } else {
+                            const el = document.createElement('textarea');
+                            el.value = url;
+                            document.body.appendChild(el);
+                            el.select();
+                            document.execCommand('copy');
+                            document.body.removeChild(el);
+                        }
+                        btn.innerHTML = `<i data-lucide="check" class="w-3.5 h-3.5 text-emerald-400 animate-bounce"></i>`;
+                    } catch (err) {
+                        console.warn('Clipboard copy failed:', err);
+                        btn.innerHTML = `<i data-lucide="alert-circle" class="w-3.5 h-3.5 text-amber-400"></i>`;
+                    }
+                    lucide.createIcons();
+                    setTimeout(() => {
+                        btn.innerHTML = `<i data-lucide="copy" class="w-3.5 h-3.5"></i>`;
+                        lucide.createIcons();
+                    }, 1500);
+                });
+            });
+
+            container.querySelectorAll('.download-binary-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    forceDownloadAsset(btn.getAttribute('data-url'), btn.getAttribute('data-filename'), btn.getAttribute('data-ext'), btn);
+                });
+            });
+        }
+
+        function getPreferredStreamableCog(item) {
+            const candidates = getDeliverableEntries(item).filter(entry => entry.classification.isStreamableCog);
+            return candidates.find(entry => entry.classification.productCode === 'GEC') ||
+                   candidates.find(entry => entry.classification.productCode === 'GEOTIFF') ||
+                   candidates[0] || null;
+        }
+
+        function configurePrimaryStreamButton(item) {
+            const primaryStreamContainer = document.getElementById('primary-stream-container');
+            const primaryStreamBtn = document.getElementById('primary-stream-btn');
+            const newPrimaryBtn = primaryStreamBtn.cloneNode(true);
+            primaryStreamBtn.parentNode.replaceChild(newPrimaryBtn, primaryStreamBtn);
+
+            const preferred = getPreferredStreamableCog(item);
+            if (!preferred) {
+                primaryStreamContainer.classList.add('hidden');
+                return;
+            }
+
+            primaryStreamContainer.classList.remove('hidden');
+            const label = preferred.classification.productCode === 'GEC'
+                ? 'Stream GEC GeoTIFF to Map'
+                : `Stream ${preferred.classification.productCode} to Map`;
+            newPrimaryBtn.innerHTML = `<i data-lucide="monitor-play" class="w-4 h-4"></i> ${escapeHtml(label)}`;
+            newPrimaryBtn.addEventListener('click', () => {
+                streamGeoTiffToMap(preferred.classification.absoluteUrl, newPrimaryBtn);
+            });
+            lucide.createIcons();
+        }
+
+        function renderAvailableDeliverables(item, statusMessage = '') {
+            const assetsContainer = document.getElementById('detail-assets-list');
+            const entries = getDeliverableEntries(item);
+            assetsContainer.innerHTML = '';
+
+            if (entries.length === 0) {
+                assetsContainer.innerHTML = `
+                    <div class="p-3 bg-slate-900/60 border border-slate-800 rounded-lg text-xs text-slate-500">
+                        No deliverable assets were listed in this STAC Item yet.${statusMessage ? `<br>${escapeHtml(statusMessage)}` : ''}
+                    </div>`;
+                lucide.createIcons();
+                return;
+            }
+
+            const products = [...new Set(entries.map(e => e.classification.productCode))].filter(Boolean).join(' · ');
+            const streamableCount = entries.filter(e => e.classification.isStreamableCog).length;
+
+            const summary = document.createElement('div');
+            summary.className = "bg-slate-900/70 border border-slate-800 rounded-lg p-2.5 text-[11px] text-slate-400 flex flex-col gap-1";
+            summary.innerHTML = `
+                <div class="flex items-center justify-between gap-2">
+                    <span><strong class="text-slate-200">${entries.length}</strong> deliverable object${entries.length === 1 ? '' : 's'} listed for this collect</span>
+                    <span class="text-indigo-300 font-mono">${streamableCount} streamable COG${streamableCount === 1 ? '' : 's'}</span>
+                </div>
+                <div class="truncate">Types: ${escapeHtml(products || 'Unknown')}</div>
+                ${statusMessage ? `<div class="text-indigo-300">${escapeHtml(statusMessage)}</div>` : ''}
+            `;
+            assetsContainer.appendChild(summary);
+
+            entries.forEach(({ key, asset, classification }) => {
+                const info = getAssetFriendlyInfo(key, asset, classification);
+                const url = classification.absoluteUrl;
+                const safeUrl = escapeHtml(url);
+                const safeKey = escapeHtml(key);
+                const safeExt = escapeHtml(classification.extension);
+                const safeFilename = escapeHtml(`${item.id || 'collect'}_${key}`);
+                const sourceBadge = asset._discoveredFromS3 ? 'S3' : 'STAC';
+                const sizeBadge = asset._sizeBytes ? `<span class="text-[9px] bg-slate-900 text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded uppercase font-mono">${escapeHtml(formatBytes(asset._sizeBytes))}</span>` : '';
+                const streamButton = classification.isStreamableCog ? `
+                    <button class="stream-raster-btn px-2 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded border border-indigo-400 text-white transition-all shadow-sm flex items-center gap-1"
+                            data-url="${safeUrl}" title="Stream ${escapeHtml(info.label)} as a Cloud Optimized GeoTIFF directly onto the map">
+                        <i data-lucide="monitor-play" class="w-3.5 h-3.5"></i><span class="hidden sm:inline text-[10px] font-bold">Stream</span>
+                    </button>` : '';
+
+                const row = document.createElement('div');
+                row.className = classification.productCode === 'GEC'
+                    ? "flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-indigo-950/30 rounded-lg text-xs font-semibold text-slate-300 transition-all border border-indigo-400/40 gap-2 shadow-lg shadow-indigo-950/20"
+                    : "flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-slate-950 hover:bg-slate-900 rounded-lg text-xs font-semibold text-slate-300 transition-all border border-slate-800 hover:border-indigo-500/30 gap-2";
+
+                row.innerHTML = `
+                    <div class="flex items-start gap-2.5 min-w-0 w-full sm:w-auto">
+                        <i data-lucide="${info.icon}" class="w-4 h-4 text-indigo-400 shrink-0 mt-0.5"></i>
+                        <div class="min-w-0">
+                            <span class="block text-slate-100 font-semibold truncate text-left">${escapeHtml(info.label)}</span>
+                            <span class="block text-[10px] text-slate-400 font-normal truncate mt-0.5 text-left">${escapeHtml(info.description)}</span>
+                            <span class="block text-[9px] text-slate-500 font-mono truncate mt-1 text-left" title="${safeUrl}">${escapeHtml(classification.fileName)}</span>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2 shrink-0 self-end sm:self-center flex-wrap justify-end">
+                        <span class="text-[9px] ${info.badgeColor} px-1.5 py-0.5 rounded uppercase font-mono">${escapeHtml(info.typeBadge)}</span>
+                        <span class="text-[9px] bg-slate-900 text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded uppercase font-mono">${escapeHtml(getMimeTypeLabel(asset))}</span>
+                        <span class="text-[9px] bg-slate-900 text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded uppercase font-mono">${sourceBadge}</span>
+                        ${sizeBadge}
+                        ${streamButton}
+                        <button class="copy-url-btn p-1.5 bg-slate-900 hover:bg-slate-800 rounded border border-slate-700 text-slate-400 hover:text-white transition-all" 
+                                data-url="${safeUrl}" title="Copy direct AWS S3 URL">
+                            <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+                        </button>
+                        <button class="download-binary-btn p-1.5 bg-indigo-900/40 hover:bg-indigo-600 rounded border border-indigo-700 text-indigo-300 hover:text-white transition-all" 
+                                data-url="${safeUrl}" data-filename="${safeFilename}" data-ext="${safeExt}" title="Download this AWS object">
+                            <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                        </button>
+                    </div>
+                `;
+                assetsContainer.appendChild(row);
+            });
+
+            wireDeliverableActionButtons(assetsContainer);
+            lucide.createIcons();
         }
 
         // Intercept click on NITF or TIFF files to bypass misconfigured S3 download headers
@@ -1517,23 +1934,14 @@
             document.getElementById('no-item-selected').classList.add('hidden');
             document.getElementById('item-details-panel').classList.remove('hidden');
 
-            // Find valid URLs for Quicklooks and GeoTIFFs
+            // Find valid Quicklook URL from STAC assets. GeoTIFF streaming is handled by getPreferredStreamableCog(), preferring GEC .tif/.tiff.
             let quicklookUrl = "";
-            let primaryGeoTiffUrl = null;
-            let geoTiffItemTitle = "GeoTIFF Asset";
 
             if (item.assets && Object.keys(item.assets).length > 0) {
                 for (const [key, asset] of Object.entries(item.assets)) {
                     const classification = classifyStacAsset(key, asset, item.sourceUrl);
-                    const absoluteUrl = classification.absoluteUrl;
-
-                    if (classification.isGeoTiff && !primaryGeoTiffUrl && absoluteUrl !== "") {
-                        primaryGeoTiffUrl = absoluteUrl;
-                        geoTiffItemTitle = asset.title || key;
-                    }
-
-                    if (classification.isPreviewImage && !quicklookUrl && absoluteUrl !== "") {
-                        quicklookUrl = absoluteUrl;
+                    if (classification.isPreviewImage && !quicklookUrl && classification.absoluteUrl !== "") {
+                        quicklookUrl = classification.absoluteUrl;
                     }
                 }
             }
@@ -1547,23 +1955,8 @@
                 thumbnailEl.classList.add('hidden');
             }
 
-            // Set up Primary Prominent Stream Button
-            const primaryStreamContainer = document.getElementById('primary-stream-container');
-            const primaryStreamBtn = document.getElementById('primary-stream-btn');
-            
-            // Deep clone button to wipe old event listeners cleanly
-            const newPrimaryBtn = primaryStreamBtn.cloneNode(true);
-            primaryStreamBtn.parentNode.replaceChild(newPrimaryBtn, primaryStreamBtn);
-
-            if (primaryGeoTiffUrl) {
-                primaryStreamContainer.classList.remove('hidden');
-                newPrimaryBtn.innerHTML = `<i data-lucide="monitor-play" class="w-4 h-4"></i> Stream ${geoTiffItemTitle} to Map`;
-                newPrimaryBtn.addEventListener('click', (e) => {
-                    streamGeoTiffToMap(primaryGeoTiffUrl, newPrimaryBtn);
-                });
-            } else {
-                primaryStreamContainer.classList.add('hidden');
-            }
+            // Set up Primary Prominent Stream Button. This prefers the GEC .tif deliverable when present.
+            configurePrimaryStreamButton(item);
 
             // Populate metadata slots
             const props = item.properties || {};
@@ -1588,111 +1981,21 @@
             document.getElementById('det-azimuth').innerText = props["umbra:target_azimuth_angle_degrees"] ? `${parseFloat(props["umbra:target_azimuth_angle_degrees"]).toFixed(1)}°` : "N/A";
             document.getElementById('det-id').innerText = props["umbra:task_id"] || item.id || "N/A";
 
-            // Populate Assets Download Links
-            const assetsContainer = document.getElementById('detail-assets-list');
-            assetsContainer.innerHTML = "";
-
-            if (item.assets && Object.keys(item.assets).length > 0) {
-                Object.keys(item.assets).forEach(key => {
-                    const asset = item.assets[key];
-                    const type = String(asset.type || "").toLowerCase();
-                    const classification = classifyStacAsset(key, asset, item.sourceUrl);
-                    const absoluteAssetUrl = classification.absoluteUrl;
-                    if (!absoluteAssetUrl) return; // skip missing urls
-
-                    const isGeoTiff = classification.isGeoTiff;
-                    const isJson = classification.isJson;
-                    const isNitf = classification.isNitf;
-                    const extension = classification.extension;
-
-                    // Fetch custom descriptor and icon for GIS analysts
-                    const info = getAssetFriendlyInfo(key, asset, isGeoTiff, isJson, isNitf);
-
-                    const assetRow = document.createElement('div');
-                    assetRow.className = "flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-slate-950 hover:bg-slate-900 rounded-lg text-xs font-semibold text-slate-300 transition-all border border-slate-800 hover:border-indigo-500/30 gap-2";
-                    
-                    const mimeTypeStr = (typeof asset.type === 'string' && asset.type.includes('/')) ? asset.type.split('/').pop().toUpperCase() : "DATA";
-
-                    assetRow.innerHTML = `
-                        <div class="flex items-start gap-2.5 truncate w-full sm:w-auto">
-                            <i data-lucide="${info.icon}" class="w-4 h-4 text-indigo-400 shrink-0 mt-0.5"></i>
-                            <div class="truncate">
-                                <span class="block text-slate-200 font-semibold truncate text-left">${info.label}</span>
-                                <span class="block text-[10px] text-slate-400 font-normal truncate mt-0.5 text-left">${info.description}</span>
-                            </div>
-                        </div>
-                        <div class="flex items-center gap-2 shrink-0 self-end sm:self-center">
-                            <span class="text-[9px] ${info.badgeColor} px-1.5 py-0.5 rounded uppercase font-mono">${mimeTypeStr}</span>
-                            
-                            <!-- Dynamic Play/Monitor Icon to Stream GeoTIFF directly to client map -->
-                            ${isGeoTiff ? `
-                            <button class="stream-raster-btn p-1.5 bg-indigo-600 hover:bg-indigo-500 rounded border border-indigo-500 text-white transition-all shadow-sm"
-                                    data-url="${absoluteAssetUrl}" title="Stream raw GeoTIFF directly onto this web map">
-                                <i data-lucide="monitor-play" class="w-3.5 h-3.5"></i>
-                            </button>
-                            ` : ''}
-
-                            <!-- Copy URL Button -->
-                            <button class="copy-url-btn p-1.5 bg-slate-900 hover:bg-slate-800 rounded border border-slate-700 text-slate-400 hover:text-white transition-all" 
-                                    data-url="${absoluteAssetUrl}" title="Copy direct S3 URL for streaming in QGIS">
-                                <i data-lucide="copy" class="w-3.5 h-3.5"></i>
-                            </button>
-                            
-                            <!-- Force Binary Download Button -->
-                            <button class="download-binary-btn p-1.5 bg-indigo-900/40 hover:bg-indigo-600 rounded border border-indigo-700 text-indigo-300 hover:text-white transition-all" 
-                                    data-url="${absoluteAssetUrl}" data-filename="${item.id || 'collect'}_${key}" data-ext="${extension}" title="Force Download binary file to disk">
-                                <i data-lucide="download" class="w-3.5 h-3.5"></i>
-                            </button>
-                        </div>
-                    `;
-                    assetsContainer.appendChild(assetRow);
-                });
-
-                // Attach GeoTIFF stream on demand handlers
-                assetsContainer.querySelectorAll('.stream-raster-btn').forEach(btn => {
-                    btn.addEventListener('click', (e) => {
-                        e.stopPropagation();
-                        const url = btn.getAttribute('data-url');
-                        streamGeoTiffToMap(url, btn);
-                    });
-                });
-
-                // Attach QGIS URL Copier handlers
-                assetsContainer.querySelectorAll('.copy-url-btn').forEach(btn => {
-                    btn.addEventListener('click', (e) => {
-                        e.stopPropagation();
-                        const url = btn.getAttribute('data-url');
-                        const el = document.createElement('textarea');
-                        el.value = url;
-                        document.body.appendChild(el);
-                        el.select();
-                        document.execCommand('copy');
-                        document.body.removeChild(el);
-                        
-                        btn.innerHTML = `<i data-lucide="check" class="w-3.5 h-3.5 text-emerald-400 animate-bounce"></i>`;
-                        lucide.createIcons();
-                        setTimeout(() => {
-                            btn.innerHTML = `<i data-lucide="copy" class="w-3.5 h-3.5"></i>`;
-                            lucide.createIcons();
-                        }, 1500);
-                    });
-                });
-
-                // Attach Forced binary downloader handlers
-                assetsContainer.querySelectorAll('.download-binary-btn').forEach(btn => {
-                    btn.addEventListener('click', (e) => {
-                        e.stopPropagation();
-                        const url = btn.getAttribute('data-url');
-                        const filename = btn.getAttribute('data-filename');
-                        const ext = btn.getAttribute('data-ext');
-                        forceDownloadAsset(url, filename, ext, btn);
-                    });
-                });
-            } else {
-                assetsContainer.innerHTML = '<p class="text-xs text-slate-500">No assets found in STAC metadata.</p>';
-            }
-
-            lucide.createIcons();
+            // Populate Available SAR Deliverables from the STAC Item, then opportunistically reconcile against sibling objects in the AWS bucket.
+            renderAvailableDeliverables(item, "Reading STAC asset links for this collect...");
+            reconcileStacAssetsWithS3(item).then(added => {
+                if (selectedItem && selectedItem.id === item.id) {
+                    configurePrimaryStreamButton(item);
+                    renderAvailableDeliverables(item, added > 0
+                        ? `Added ${added} sibling AWS object${added === 1 ? '' : 's'} from the collect folder.`
+                        : "STAC assets verified; no additional sibling AWS objects found.");
+                }
+            }).catch(err => {
+                console.warn('S3 reconciliation failed:', err);
+                if (selectedItem && selectedItem.id === item.id) {
+                    renderAvailableDeliverables(item, "Showing STAC-listed deliverables. S3 sibling discovery was blocked or unavailable.");
+                }
+            });
 
             // Refresh Map Overlay configurations
             document.getElementById('overlay-map-toggle').checked = false;
