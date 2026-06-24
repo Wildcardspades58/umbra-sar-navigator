@@ -1717,10 +1717,58 @@
                 });
         }
 
+        function getCandidateUrlsForItem(item) {
+            const urls = [];
+            if (item?.sourceUrl) urls.push(item.sourceUrl);
+            if (item?.links) item.links.forEach(link => { if (link?.href) urls.push(link.href); });
+            if (item?.assets) Object.values(item.assets).forEach(asset => { if (asset?.href) urls.push(asset.href); });
+            return getUniqueValues(urls.map(raw => translateS3Url(raw, item?.sourceUrl || activeCatalogUrl)));
+        }
+
+        function getCandidateS3KeysForItem(item) {
+            return getCandidateUrlsForItem(item)
+                .map(url => parseS3ObjectUrl(url))
+                .filter(Boolean)
+                .map(parsed => parsed.key)
+                .filter(Boolean);
+        }
+
+        function extractUuidValues(value) {
+            return String(value || '').match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/ig) || [];
+        }
+
+        function getUmbraUuidVariantsForItem(item) {
+            const props = item?.properties || {};
+            const values = [
+                item?.id,
+                item?.collection,
+                props['umbra:collect_id'],
+                props['umbra:task_id'],
+                props['umbra:order_id'],
+                props['umbra:collect_name']
+            ];
+            getCandidateUrlsForItem(item).forEach(url => values.push(url));
+            return getUniqueValues(values.flatMap(extractUuidValues));
+        }
+
+        function getDecodedKeySegments(key) {
+            return String(key || '')
+                .split('/')
+                .map(seg => {
+                    try { return decodeURIComponent(seg); }
+                    catch(e) { return seg; }
+                })
+                .filter(Boolean);
+        }
+
         function extractUmbraTaskFolderFromKey(key) {
-            const decoded = String(key || '');
-            const match = decoded.match(/(?:^|\/)sar-data\/tasks\/([^/]+)\//i);
-            return match ? normalizeUmbraTaskFolderName(decodeURIComponent(match[1])) : '';
+            const segments = getDecodedKeySegments(key);
+            const sarIdx = segments.findIndex((seg, idx) => seg.toLowerCase() === 'sar-data' && (segments[idx + 1] || '').toLowerCase() === 'tasks');
+            if (sarIdx !== -1 && segments[sarIdx + 2]) return normalizeUmbraTaskFolderName(segments[sarIdx + 2]);
+
+            const uuidIdx = segments.findIndex(seg => extractUuidValues(seg).length > 0);
+            if (uuidIdx > 0) return normalizeUmbraTaskFolderName(segments[uuidIdx - 1]);
+            return '';
         }
 
         function getUmbraTargetFolderNamesForItem(item) {
@@ -1733,13 +1781,16 @@
                 item?.title
             ];
 
-            if (item?.assets) {
-                Object.values(item.assets).forEach(asset => {
-                    const href = asset?.href ? translateS3Url(asset.href, item.sourceUrl) : '';
-                    const parsed = parseS3ObjectUrl(href);
-                    if (parsed?.key) values.push(extractUmbraTaskFolderFromKey(parsed.key));
-                });
-            }
+            getCandidateS3KeysForItem(item).forEach(key => values.push(extractUmbraTaskFolderFromKey(key)));
+
+            // Some static STAC paths mirror sar-data/tasks as stac/<target>/<uuid>/<collect-folder>/item.json.
+            // Pull the folder immediately before the UUID; that is usually the human target/location folder.
+            getCandidateUrlsForItem(item).forEach(url => {
+                const decoded = decodeURIComponent(String(url || ''));
+                const parts = decoded.split('/').filter(Boolean);
+                const uuidIdx = parts.findIndex(part => extractUuidValues(part).length > 0);
+                if (uuidIdx > 0) values.push(parts[uuidIdx - 1]);
+            });
 
             return getUniqueValues(values.map(normalizeUmbraTaskFolderName));
         }
@@ -1762,10 +1813,8 @@
                 values.push(stamp.slice(0, 10));
             });
 
-            const scanUrls = [item?.sourceUrl];
-            if (item?.assets) Object.values(item.assets).forEach(asset => scanUrls.push(asset?.href));
-            scanUrls.filter(Boolean).forEach(raw => {
-                const decoded = decodeURIComponent(String(raw));
+            getCandidateUrlsForItem(item).forEach(raw => {
+                const decoded = decodeURIComponent(String(raw || ''));
                 const matches = decoded.match(/\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}/g) || [];
                 matches.forEach(m => values.push(m));
                 const dateMatches = decoded.match(/\d{4}-\d{2}-\d{2}/g) || [];
@@ -1792,45 +1841,128 @@
                 }
             }
 
-            if (item?.assets) {
-                Object.values(item.assets).forEach(asset => {
-                    const href = decodeURIComponent(String(asset?.href || ''));
-                    const matches = href.match(/UMBRA[-_]\d+/ig) || [];
-                    matches.forEach(m => values.push(m.toUpperCase().replace(/_/g, '-')));
-                });
-            }
+            getCandidateUrlsForItem(item).forEach(rawUrl => {
+                const decoded = decodeURIComponent(String(rawUrl || ''));
+                const matches = decoded.match(/UMBRA[-_]\d+/ig) || [];
+                matches.forEach(m => values.push(m.toUpperCase().replace(/_/g, '-')));
+            });
 
-            return getUniqueValues(values.length ? values : ['UMBRA-05']);
+            // Keep a small fallback set, but only after URL/property-derived values have been tried.
+            if (values.length === 0) ['UMBRA-04', 'UMBRA-05', 'UMBRA-07', 'UMBRA-09'].forEach(v => values.push(v));
+            return getUniqueValues(values);
+        }
+
+        function getUmbraCollectFolderVariantsForItem(item) {
+            const values = [];
+            const stamps = getUmbraTimestampVariantsForItem(item).filter(v => /^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$/.test(v));
+            const platforms = getUmbraPlatformVariantsForItem(item);
+
+            getCandidateUrlsForItem(item).forEach(rawUrl => {
+                const decoded = decodeURIComponent(String(rawUrl || ''));
+                const matches = decoded.match(/\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}[_-]UMBRA[-_]\d+/ig) || [];
+                matches.forEach(m => values.push(m.replace(/-/g, (match, offset, str) => {
+                    // Preserve date hyphens and normalize only UMBRA separator later.
+                    return match;
+                }).replace(/_UMBRA_/i, '_UMBRA-').replace(/-UMBRA-/i, '_UMBRA-')));
+            });
+
+            stamps.forEach(stamp => {
+                platforms.forEach(platform => {
+                    values.push(`${stamp}_${platform.toUpperCase().replace(/_/g, '-')}`);
+                });
+                // Some legacy folders use the timestamp alone.
+                values.push(stamp);
+            });
+
+            return getUniqueValues(values);
+        }
+
+        function addPrefixToMap(prefixMap, bucket, region, prefix, source, score = 0) {
+            const cleanPrefix = String(prefix || '').replace(/^\/+/, '').split('\\').join('/').replace(/\/+/g, '/');
+            if (!cleanPrefix || cleanPrefix === '/' || !cleanPrefix.endsWith('/')) return;
+            const id = `${bucket}|${region}|${cleanPrefix}`;
+            const existing = prefixMap.get(id);
+            if (!existing || score > existing.score) prefixMap.set(id, { bucket, region, prefix: cleanPrefix, source, score });
+        }
+
+        function getMirroredSarDataPrefixesFromStacPaths(item) {
+            const { bucket, region } = getUmbraOpenDataBucketInfo();
+            const prefixMap = new Map();
+
+            getCandidateS3KeysForItem(item).forEach(key => {
+                const segments = getDecodedKeySegments(key);
+                const uuidIdx = segments.findIndex(seg => extractUuidValues(seg).length > 0);
+                if (uuidIdx === -1) return;
+
+                // If this is already a real sar-data object, use its directory exactly.
+                const sarIdx = segments.findIndex((seg, idx) => seg.toLowerCase() === 'sar-data' && (segments[idx + 1] || '').toLowerCase() === 'tasks');
+                if (sarIdx !== -1) {
+                    const objectLooksLikeFile = /\.[a-z0-9]+$/i.test(segments[segments.length - 1] || '');
+                    const dirSegments = objectLooksLikeFile ? segments.slice(0, -1) : segments;
+                    addPrefixToMap(prefixMap, bucket, region, dirSegments.join('/') + '/', 'exact-sar-data-url', 500);
+                    return;
+                }
+
+                // Static STAC metadata mirrors the delivery path shape. Convert the part around the UUID to sar-data/tasks.
+                // Example: stac/<target>/<uuid>/<YYYY-MM-DD-HH-MM-SS_UMBRA-09>/item.json
+                const target = uuidIdx > 0 ? normalizeUmbraTaskFolderName(segments[uuidIdx - 1]) : '';
+                const uuid = extractUuidValues(segments[uuidIdx])[0];
+                const afterUuid = segments[uuidIdx + 1] || '';
+                if (target && uuid && /^\d{4}-\d{2}-\d{2}/.test(afterUuid)) {
+                    addPrefixToMap(prefixMap, bucket, region, `sar-data/tasks/${target}/${uuid}/${afterUuid}/`, 'stac-mirror-converted', 450);
+                }
+            });
+
+            return Array.from(prefixMap.values()).sort((a, b) => b.score - a.score);
         }
 
         function getDerivedUmbraImagePrefixesForItem(item) {
             const { bucket, region } = getUmbraOpenDataBucketInfo();
             const targets = getUmbraTargetFolderNamesForItem(item);
-            const stamps = getUmbraTimestampVariantsForItem(item).filter(v => /^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$/.test(v));
-            const prefixes = [];
+            const uuids = getUmbraUuidVariantsForItem(item);
+            const folders = getUmbraCollectFolderVariantsForItem(item);
+            const prefixMap = new Map();
+
+            // First, exact STAC mirror conversion. This is the most reliable source because it preserves UUID and collect folder.
+            getMirroredSarDataPrefixesFromStacPaths(item).forEach(entry => {
+                addPrefixToMap(prefixMap, entry.bucket, entry.region, entry.prefix, entry.source, entry.score || 450);
+            });
+
             targets.forEach(target => {
-                stamps.forEach(stamp => {
-                    prefixes.push({ bucket, region, prefix: `sar-data/tasks/${target}/${stamp}/`, source: 'derived-image-folder' });
+                uuids.forEach(uuid => {
+                    folders.forEach(folder => {
+                        addPrefixToMap(prefixMap, bucket, region, `sar-data/tasks/${target}/${uuid}/${folder}/`, 'derived-target-uuid-collect-folder', 350);
+                    });
+                    addPrefixToMap(prefixMap, bucket, region, `sar-data/tasks/${target}/${uuid}/`, 'derived-target-uuid-root', 250);
+                });
+
+                // Legacy/assorted folders occasionally omit the UUID level; keep these as lower priority fallbacks.
+                folders.forEach(folder => {
+                    addPrefixToMap(prefixMap, bucket, region, `sar-data/tasks/${target}/${folder}/`, 'derived-target-collect-folder-legacy', 100);
                 });
             });
-            return prefixes;
+
+            return Array.from(prefixMap.values()).sort((a, b) => b.score - a.score).slice(0, 24);
         }
 
         function getDerivedUmbraTaskRootPrefixesForItem(item) {
             const { bucket, region } = getUmbraOpenDataBucketInfo();
-            return getUmbraTargetFolderNamesForItem(item).map(target => ({
-                bucket,
-                region,
-                prefix: `sar-data/tasks/${target}/`,
-                source: 'derived-task-root'
-            }));
+            const prefixMap = new Map();
+            const targets = getUmbraTargetFolderNamesForItem(item);
+            const uuids = getUmbraUuidVariantsForItem(item);
+
+            targets.forEach(target => {
+                uuids.forEach(uuid => addPrefixToMap(prefixMap, bucket, region, `sar-data/tasks/${target}/${uuid}/`, 'derived-target-uuid-root', 300));
+                addPrefixToMap(prefixMap, bucket, region, `sar-data/tasks/${target}/`, 'derived-task-root', 100);
+            });
+            return Array.from(prefixMap.values()).sort((a, b) => b.score - a.score).slice(0, 24);
         }
 
         function getPredictedUmbraDeliverableObjectsForItem(item) {
             const { bucket, region } = getUmbraOpenDataBucketInfo();
             const targets = getUmbraTargetFolderNamesForItem(item);
-            const stamps = getUmbraTimestampVariantsForItem(item).filter(v => /^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$/.test(v));
-            const platforms = getUmbraPlatformVariantsForItem(item);
+            const uuids = getUmbraUuidVariantsForItem(item);
+            const folders = getUmbraCollectFolderVariantsForItem(item);
             const products = [
                 { code: 'GEC', ext: 'tif' },
                 { code: 'SIDD', ext: 'nitf' },
@@ -1839,58 +1971,88 @@
                 { code: 'METADATA', ext: 'json' }
             ];
             const objects = [];
+            const addPredicted = (prefix, folder, product) => {
+                const fileStem = /^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}[_-]UMBRA[-_]\d+$/i.test(folder)
+                    ? folder.replace(/-UMBRA-/i, '_UMBRA-').replace(/_UMBRA_/i, '_UMBRA-')
+                    : `${folder}`;
+                const key = `${prefix}${fileStem}_${product.code}.${product.ext}`;
+                objects.push({ key, url: getS3ObjectUrl(bucket, region, key), bucket, region, product });
+            };
+
+            // If we already derived exact folders, predict inside those first.
+            getDerivedUmbraImagePrefixesForItem(item).forEach(entry => {
+                const folder = entry.prefix.replace(/\/$/, '').split('/').pop();
+                products.forEach(product => addPredicted(entry.prefix, folder, product));
+            });
+
+            // Lower-priority legacy predictions.
             targets.forEach(target => {
-                stamps.forEach(stamp => {
-                    platforms.forEach(platform => {
-                        products.forEach(product => {
-                            const key = `sar-data/tasks/${target}/${stamp}/${stamp}_${platform}_${product.code}.${product.ext}`;
-                            objects.push({ key, url: getS3ObjectUrl(bucket, region, key), bucket, region, product });
-                        });
+                folders.forEach(folder => {
+                    products.forEach(product => addPredicted(`sar-data/tasks/${target}/${folder}/`, folder, product));
+                });
+                uuids.forEach(uuid => {
+                    folders.forEach(folder => {
+                        products.forEach(product => addPredicted(`sar-data/tasks/${target}/${uuid}/${folder}/`, folder, product));
                     });
                 });
             });
-            return objects.slice(0, 60);
+
+            const seen = new Set();
+            return objects.filter(obj => {
+                if (seen.has(obj.key)) return false;
+                seen.add(obj.key);
+                return true;
+            }).slice(0, 160);
         }
 
         function getS3DirectoryPrefixesForItem(item) {
-            const urls = [];
-            if (item?.assets) {
-                Object.values(item.assets).forEach(asset => {
-                    if (asset?.href) urls.push(translateS3Url(asset.href, item.sourceUrl));
-                });
-            }
-
             const prefixMap = new Map();
 
-            // The GEC .tif lives under sar-data/tasks/<target>/<collect-time>/, not under the static STAC JSON folder.
+            // Highest priority: exact/mirrored delivery folder from the STAC path itself.
             getDerivedUmbraImagePrefixesForItem(item).forEach(entry => {
-                const id = `${entry.bucket}|${entry.region}|${entry.prefix}`;
-                prefixMap.set(id, entry);
+                addPrefixToMap(prefixMap, entry.bucket, entry.region, entry.prefix, entry.source, entry.score || 300);
             });
 
-            urls.forEach(url => {
+            getCandidateUrlsForItem(item).forEach(url => {
                 const parsed = parseS3ObjectUrl(url);
                 if (!parsed || !parsed.key || !parsed.key.includes('/')) return;
                 if (/^stac\//i.test(parsed.key)) return; // never list STAC metadata folders as SAR image deliverable folders
                 const prefix = parsed.key.split('/').slice(0, -1).join('/') + '/';
                 if (!prefix || prefix === '/' || prefix.split('/').length < 2) return;
-                const id = `${parsed.bucket}|${parsed.region}|${prefix}`;
-                prefixMap.set(id, { bucket: parsed.bucket, region: parsed.region, prefix, source: 'stac-asset-folder' });
+                addPrefixToMap(prefixMap, parsed.bucket, parsed.region, prefix, 'stac-asset-folder', 400);
             });
 
-            return Array.from(prefixMap.values()).slice(0, 12);
+            return Array.from(prefixMap.values()).sort((a, b) => b.score - a.score).slice(0, 36);
+        }
+
+        function parseS3ListXml(xmlText, bucket, region) {
+            const xml = new DOMParser().parseFromString(xmlText, 'application/xml');
+            const errorNode = xml.querySelector('Error Code');
+            if (errorNode) throw new Error(`S3 list error: ${errorNode.textContent || 'Unknown error'}`);
+
+            const contents = Array.from(xml.querySelectorAll('Contents')).map(node => {
+                const key = node.querySelector('Key')?.textContent || '';
+                const size = parseInt(node.querySelector('Size')?.textContent || '0', 10);
+                return key && size > 0 ? { key, size, url: getS3ObjectUrl(bucket, region, key) } : null;
+            }).filter(Boolean);
+
+            const prefixes = Array.from(xml.querySelectorAll('CommonPrefixes Prefix')).map(node => node.textContent || '').filter(Boolean);
+            const truncated = (xml.querySelector('IsTruncated')?.textContent || '').toLowerCase() === 'true';
+            const continuationToken = xml.querySelector('NextContinuationToken')?.textContent || null;
+            return { contents, prefixes, truncated, continuationToken };
+        }
+
+        async function fetchS3ListXml(bucket, region, params) {
+            const listUrl = `https://${bucket}.s3.${region || 'us-west-2'}.amazonaws.com/?${params.toString()}`;
+            const response = await fetch(listUrl, { cache: 'no-store' });
+            if (!response.ok) throw new Error(`S3 list failed with HTTP ${response.status}`);
+            return await response.text();
         }
 
         async function listS3CommonPrefixes(bucket, region, prefix) {
             const params = new URLSearchParams({ 'list-type': '2', prefix, delimiter: '/', 'max-keys': '1000' });
-            const listUrl = `https://${bucket}.s3.${region || 'us-west-2'}.amazonaws.com/?${params.toString()}`;
-            const response = await fetch(listUrl, { cache: 'no-store' });
-            if (!response.ok) throw new Error(`S3 prefix discovery failed with HTTP ${response.status}`);
-            const xmlText = await response.text();
-            const xml = new DOMParser().parseFromString(xmlText, 'application/xml');
-            const errorNode = xml.querySelector('Error Code');
-            if (errorNode) throw new Error(`S3 list error: ${errorNode.textContent || 'Unknown error'}`);
-            return Array.from(xml.querySelectorAll('CommonPrefixes Prefix')).map(node => node.textContent || '').filter(Boolean);
+            const xmlText = await fetchS3ListXml(bucket, region, params);
+            return parseS3ListXml(xmlText, bucket, region).prefixes;
         }
 
         async function listS3PrefixObjects(bucket, region, prefix, options = {}) {
@@ -1902,23 +2064,11 @@
             for (let page = 0; page < maxPages; page++) {
                 const params = new URLSearchParams({ 'list-type': '2', prefix, 'max-keys': String(maxKeys) });
                 if (continuationToken) params.set('continuation-token', continuationToken);
-                const listUrl = `https://${bucket}.s3.${region || 'us-west-2'}.amazonaws.com/?${params.toString()}`;
-                const response = await fetch(listUrl, { cache: 'no-store' });
-                if (!response.ok) throw new Error(`S3 list failed with HTTP ${response.status}`);
-                const xmlText = await response.text();
-                const xml = new DOMParser().parseFromString(xmlText, 'application/xml');
-                const errorNode = xml.querySelector('Error Code');
-                if (errorNode) throw new Error(`S3 list error: ${errorNode.textContent || 'Unknown error'}`);
-
-                Array.from(xml.querySelectorAll('Contents')).forEach(node => {
-                    const key = node.querySelector('Key')?.textContent || '';
-                    const size = parseInt(node.querySelector('Size')?.textContent || '0', 10);
-                    if (key && size > 0) all.push({ key, size, url: getS3ObjectUrl(bucket, region, key) });
-                });
-
-                const truncated = (xml.querySelector('IsTruncated')?.textContent || '').toLowerCase() === 'true';
-                continuationToken = xml.querySelector('NextContinuationToken')?.textContent || null;
-                if (!truncated || !continuationToken) break;
+                const xmlText = await fetchS3ListXml(bucket, region, params);
+                const parsed = parseS3ListXml(xmlText, bucket, region);
+                all.push(...parsed.contents);
+                continuationToken = parsed.continuationToken;
+                if (!parsed.truncated || !continuationToken) break;
             }
 
             return all;
@@ -2011,19 +2161,42 @@
             const stamps = getUmbraTimestampVariantsForItem(item);
             const exactStamps = stamps.filter(v => /^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$/.test(v));
             const dateStamps = stamps.filter(v => /^\d{4}-\d{2}-\d{2}$/.test(v));
+            const uuids = getUmbraUuidVariantsForItem(item);
+            const platforms = getUmbraPlatformVariantsForItem(item).map(p => p.toUpperCase().replace(/_/g, '-'));
             const discovered = [];
+
+            const scorePrefix = prefix => {
+                const folderName = prefix.replace(/\/$/, '').split('/').pop() || '';
+                let score = 0;
+                if (exactStamps.some(stamp => folderName.includes(stamp))) score += 100;
+                if (dateStamps.some(stamp => folderName.includes(stamp))) score += 20;
+                if (platforms.some(platform => folderName.toUpperCase().includes(platform))) score += 50;
+                if (uuids.some(uuid => prefix.includes(uuid))) score += 60;
+                if (/\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}/.test(folderName)) score += 5;
+                return score;
+            };
 
             for (const root of roots) {
                 try {
                     const childPrefixes = await listS3CommonPrefixes(root.bucket, root.region, root.prefix);
-                    childPrefixes.forEach(prefix => {
-                        const folderName = prefix.replace(/\/$/, '').split('/').pop() || '';
-                        let score = 0;
-                        if (exactStamps.some(stamp => folderName.includes(stamp))) score += 100;
-                        if (dateStamps.some(stamp => folderName.includes(stamp))) score += 20;
-                        if (/\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}/.test(folderName)) score += 5;
-                        if (score > 0) discovered.push({ ...root, prefix, source: 'discovered-task-child', score });
-                    });
+                    for (const childPrefix of childPrefixes) {
+                        const childScore = scorePrefix(childPrefix);
+                        if (childScore > 0) discovered.push({ ...root, prefix: childPrefix, source: 'discovered-task-child', score: childScore });
+
+                        // Umbra Open Data commonly uses sar-data/tasks/<target>/<uuid>/<YYYY-MM-DD-HH-MM-SS_UMBRA-##>/.
+                        // If the first child is the UUID folder, walk one level deeper to reach the actual image folder.
+                        if (extractUuidValues(childPrefix).length > 0 || uuids.some(uuid => childPrefix.includes(uuid)) || root.source === 'derived-task-root') {
+                            try {
+                                const grandchildPrefixes = await listS3CommonPrefixes(root.bucket, root.region, childPrefix);
+                                grandchildPrefixes.forEach(grandchildPrefix => {
+                                    const score = scorePrefix(grandchildPrefix) + 10;
+                                    if (score > 10) discovered.push({ ...root, prefix: grandchildPrefix, source: 'discovered-task-grandchild', score });
+                                });
+                            } catch (e) {
+                                console.warn('Umbra second-level prefix discovery failed:', childPrefix, e);
+                            }
+                        }
+                    }
                 } catch (e) {
                     console.warn('Umbra task-root prefix discovery failed:', root.prefix, e);
                 }
@@ -2038,7 +2211,7 @@
                     seen.add(id);
                     return true;
                 })
-                .slice(0, 8);
+                .slice(0, 16);
         }
 
         async function addPredictedUmbraDeliverables(item) {
@@ -2576,7 +2749,7 @@
                     configurePrimaryStreamButton(item);
                     renderAvailableDeliverables(item, added > 0
                         ? `Added ${added} AWS object${added === 1 ? '' : 's'} from the selected image delivery folder / naming fallback.`
-                        : "Checked the derived image delivery folder. No additional AWS objects were exposed by S3 for this collect.");
+                        : "Checked exact STAC→sar-data mirrored folders, target/UUID collect folders, and predicted Umbra GEC/SICD/SIDD/CPHD object names. No additional AWS objects were exposed for this collect.");
                 }
             }).catch(err => {
                 console.warn('S3 reconciliation failed:', err);
