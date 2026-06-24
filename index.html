@@ -72,7 +72,7 @@
             <div>
                 <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
                     Umbra SAR Navigator 
-                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.1</span>
+                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.2</span>
                     <span class="text-xs bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded font-normal">Analyst Tool</span>
                 </h1>
                 <p class="text-xs text-slate-400">Interactive OpenStreetMap client for Umbra Space SpatioTemporal Asset Catalogs</p>
@@ -1692,6 +1692,166 @@
             return `https://${bucket}.s3.${region || 'us-west-2'}.amazonaws.com/${String(key || '').split('/').map(encodeURIComponent).join('/')}`;
         }
 
+        function getUmbraOpenDataBucketInfo() {
+            return { bucket: 'umbra-open-data-catalog', region: 'us-west-2' };
+        }
+
+        function normalizeUmbraTaskFolderName(value) {
+            return String(value || '')
+                .trim()
+                .replace(/\\/g, '/')
+                .replace(/^\/+|\/+$/g, '')
+                .replace(/\s+/g, ' ');
+        }
+
+        function getUniqueValues(values) {
+            const seen = new Set();
+            return values
+                .map(v => String(v || '').trim())
+                .filter(Boolean)
+                .filter(v => {
+                    const id = v.toLowerCase();
+                    if (seen.has(id)) return false;
+                    seen.add(id);
+                    return true;
+                });
+        }
+
+        function extractUmbraTaskFolderFromKey(key) {
+            const decoded = String(key || '');
+            const match = decoded.match(/(?:^|\/)sar-data\/tasks\/([^/]+)\//i);
+            return match ? normalizeUmbraTaskFolderName(decodeURIComponent(match[1])) : '';
+        }
+
+        function getUmbraTargetFolderNamesForItem(item) {
+            const props = item?.properties || {};
+            const values = [
+                props['umbra:target_name'],
+                props['umbra:open_data_location'],
+                props['umbra:site_name'],
+                props['title'],
+                item?.title
+            ];
+
+            if (item?.assets) {
+                Object.values(item.assets).forEach(asset => {
+                    const href = asset?.href ? translateS3Url(asset.href, item.sourceUrl) : '';
+                    const parsed = parseS3ObjectUrl(href);
+                    if (parsed?.key) values.push(extractUmbraTaskFolderFromKey(parsed.key));
+                });
+            }
+
+            return getUniqueValues(values.map(normalizeUmbraTaskFolderName));
+        }
+
+        function pad2(value) {
+            return String(value).padStart(2, '0');
+        }
+
+        function getUmbraTimestampVariantsForItem(item) {
+            const props = item?.properties || {};
+            const values = [];
+            const dateFields = [props.datetime, props.start_datetime, props.end_datetime, props.created, props.updated];
+
+            dateFields.forEach(value => {
+                if (!value) return;
+                const d = new Date(value);
+                if (Number.isNaN(d.getTime())) return;
+                const stamp = `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}-${pad2(d.getUTCHours())}-${pad2(d.getUTCMinutes())}-${pad2(d.getUTCSeconds())}`;
+                values.push(stamp);
+                values.push(stamp.slice(0, 10));
+            });
+
+            const scanUrls = [item?.sourceUrl];
+            if (item?.assets) Object.values(item.assets).forEach(asset => scanUrls.push(asset?.href));
+            scanUrls.filter(Boolean).forEach(raw => {
+                const decoded = decodeURIComponent(String(raw));
+                const matches = decoded.match(/\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}/g) || [];
+                matches.forEach(m => values.push(m));
+                const dateMatches = decoded.match(/\d{4}-\d{2}-\d{2}/g) || [];
+                dateMatches.forEach(m => values.push(m));
+            });
+
+            return getUniqueValues(values);
+        }
+
+        function getUmbraPlatformVariantsForItem(item) {
+            const props = item?.properties || {};
+            const raw = String(props.platform || props['platform'] || '').trim();
+            const values = [];
+            if (raw) {
+                const upper = raw.toUpperCase().replace(/_/g, '-');
+                values.push(upper);
+                const match = upper.match(/UMBRA[- ]?(\d+)/i);
+                if (match) {
+                    const n = parseInt(match[1], 10);
+                    if (Number.isFinite(n)) {
+                        values.push(`UMBRA-${pad2(n)}`);
+                        values.push(`UMBRA-${n}`);
+                    }
+                }
+            }
+
+            if (item?.assets) {
+                Object.values(item.assets).forEach(asset => {
+                    const href = decodeURIComponent(String(asset?.href || ''));
+                    const matches = href.match(/UMBRA[-_]\d+/ig) || [];
+                    matches.forEach(m => values.push(m.toUpperCase().replace(/_/g, '-')));
+                });
+            }
+
+            return getUniqueValues(values.length ? values : ['UMBRA-05']);
+        }
+
+        function getDerivedUmbraImagePrefixesForItem(item) {
+            const { bucket, region } = getUmbraOpenDataBucketInfo();
+            const targets = getUmbraTargetFolderNamesForItem(item);
+            const stamps = getUmbraTimestampVariantsForItem(item).filter(v => /^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$/.test(v));
+            const prefixes = [];
+            targets.forEach(target => {
+                stamps.forEach(stamp => {
+                    prefixes.push({ bucket, region, prefix: `sar-data/tasks/${target}/${stamp}/`, source: 'derived-image-folder' });
+                });
+            });
+            return prefixes;
+        }
+
+        function getDerivedUmbraTaskRootPrefixesForItem(item) {
+            const { bucket, region } = getUmbraOpenDataBucketInfo();
+            return getUmbraTargetFolderNamesForItem(item).map(target => ({
+                bucket,
+                region,
+                prefix: `sar-data/tasks/${target}/`,
+                source: 'derived-task-root'
+            }));
+        }
+
+        function getPredictedUmbraDeliverableObjectsForItem(item) {
+            const { bucket, region } = getUmbraOpenDataBucketInfo();
+            const targets = getUmbraTargetFolderNamesForItem(item);
+            const stamps = getUmbraTimestampVariantsForItem(item).filter(v => /^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$/.test(v));
+            const platforms = getUmbraPlatformVariantsForItem(item);
+            const products = [
+                { code: 'GEC', ext: 'tif' },
+                { code: 'SIDD', ext: 'nitf' },
+                { code: 'SICD', ext: 'nitf' },
+                { code: 'CPHD', ext: 'cphd' },
+                { code: 'METADATA', ext: 'json' }
+            ];
+            const objects = [];
+            targets.forEach(target => {
+                stamps.forEach(stamp => {
+                    platforms.forEach(platform => {
+                        products.forEach(product => {
+                            const key = `sar-data/tasks/${target}/${stamp}/${stamp}_${platform}_${product.code}.${product.ext}`;
+                            objects.push({ key, url: getS3ObjectUrl(bucket, region, key), bucket, region, product });
+                        });
+                    });
+                });
+            });
+            return objects.slice(0, 60);
+        }
+
         function getS3DirectoryPrefixesForItem(item) {
             const urls = [];
             if (item?.assets) {
@@ -1699,42 +1859,78 @@
                     if (asset?.href) urls.push(translateS3Url(asset.href, item.sourceUrl));
                 });
             }
-            if (item?.sourceUrl) urls.push(translateS3Url(item.sourceUrl, item.sourceUrl));
 
             const prefixMap = new Map();
+
+            // The GEC .tif lives under sar-data/tasks/<target>/<collect-time>/, not under the static STAC JSON folder.
+            getDerivedUmbraImagePrefixesForItem(item).forEach(entry => {
+                const id = `${entry.bucket}|${entry.region}|${entry.prefix}`;
+                prefixMap.set(id, entry);
+            });
+
             urls.forEach(url => {
                 const parsed = parseS3ObjectUrl(url);
                 if (!parsed || !parsed.key || !parsed.key.includes('/')) return;
+                if (/^stac\//i.test(parsed.key)) return; // never list STAC metadata folders as SAR image deliverable folders
                 const prefix = parsed.key.split('/').slice(0, -1).join('/') + '/';
-                // Do not list the bucket root or broad STAC index folders; only sibling folders close to the selected image.
-                if (!prefix || prefix === '/' || prefix === 'stac/' || prefix.split('/').length < 2) return;
+                if (!prefix || prefix === '/' || prefix.split('/').length < 2) return;
                 const id = `${parsed.bucket}|${parsed.region}|${prefix}`;
-                prefixMap.set(id, { bucket: parsed.bucket, region: parsed.region, prefix });
+                prefixMap.set(id, { bucket: parsed.bucket, region: parsed.region, prefix, source: 'stac-asset-folder' });
             });
-            return Array.from(prefixMap.values()).slice(0, 6);
+
+            return Array.from(prefixMap.values()).slice(0, 12);
         }
 
-        async function listS3PrefixObjects(bucket, region, prefix) {
-            const params = new URLSearchParams({ 'list-type': '2', prefix, 'max-keys': '1000' });
+        async function listS3CommonPrefixes(bucket, region, prefix) {
+            const params = new URLSearchParams({ 'list-type': '2', prefix, delimiter: '/', 'max-keys': '1000' });
             const listUrl = `https://${bucket}.s3.${region || 'us-west-2'}.amazonaws.com/?${params.toString()}`;
             const response = await fetch(listUrl, { cache: 'no-store' });
-            if (!response.ok) throw new Error(`S3 list failed with HTTP ${response.status}`);
+            if (!response.ok) throw new Error(`S3 prefix discovery failed with HTTP ${response.status}`);
             const xmlText = await response.text();
             const xml = new DOMParser().parseFromString(xmlText, 'application/xml');
             const errorNode = xml.querySelector('Error Code');
             if (errorNode) throw new Error(`S3 list error: ${errorNode.textContent || 'Unknown error'}`);
+            return Array.from(xml.querySelectorAll('CommonPrefixes Prefix')).map(node => node.textContent || '').filter(Boolean);
+        }
 
-            return Array.from(xml.querySelectorAll('Contents')).map(node => {
-                const key = node.querySelector('Key')?.textContent || '';
-                const size = parseInt(node.querySelector('Size')?.textContent || '0', 10);
-                return { key, size, url: getS3ObjectUrl(bucket, region, key) };
-            }).filter(obj => obj.key && obj.size > 0);
+        async function listS3PrefixObjects(bucket, region, prefix, options = {}) {
+            const maxPages = options.maxPages || 3;
+            const maxKeys = options.maxKeys || 1000;
+            const all = [];
+            let continuationToken = null;
+
+            for (let page = 0; page < maxPages; page++) {
+                const params = new URLSearchParams({ 'list-type': '2', prefix, 'max-keys': String(maxKeys) });
+                if (continuationToken) params.set('continuation-token', continuationToken);
+                const listUrl = `https://${bucket}.s3.${region || 'us-west-2'}.amazonaws.com/?${params.toString()}`;
+                const response = await fetch(listUrl, { cache: 'no-store' });
+                if (!response.ok) throw new Error(`S3 list failed with HTTP ${response.status}`);
+                const xmlText = await response.text();
+                const xml = new DOMParser().parseFromString(xmlText, 'application/xml');
+                const errorNode = xml.querySelector('Error Code');
+                if (errorNode) throw new Error(`S3 list error: ${errorNode.textContent || 'Unknown error'}`);
+
+                Array.from(xml.querySelectorAll('Contents')).forEach(node => {
+                    const key = node.querySelector('Key')?.textContent || '';
+                    const size = parseInt(node.querySelector('Size')?.textContent || '0', 10);
+                    if (key && size > 0) all.push({ key, size, url: getS3ObjectUrl(bucket, region, key) });
+                });
+
+                const truncated = (xml.querySelector('IsTruncated')?.textContent || '').toLowerCase() === 'true';
+                continuationToken = xml.querySelector('NextContinuationToken')?.textContent || null;
+                if (!truncated || !continuationToken) break;
+            }
+
+            return all;
         }
 
         function shouldDisplayS3Object(pathname) {
-            return hasStrictExtension(pathname, [
-                '.tif', '.tiff', '.nitf', '.ntf', '.json', '.geojson', '.cphd', '.gif', '.png', '.jpg', '.jpeg', '.webp', '.zip'
-            ]) || pathname.endsWith('.crsd.zip') || pathname.endsWith('.cphd.zip');
+            const path = String(pathname || '').toLowerCase();
+            if (!path || path.endsWith('/')) return false;
+            if (hasStrictExtension(path, ['.html', '.htm'])) return false;
+            // Now that we list the selected image delivery folder, show every real object there.
+            // Classification and stream buttons are applied later per object.
+            return true;
         }
 
         function makeDiscoveredAssetKey(key) {
@@ -1751,44 +1947,150 @@
             return key;
         }
 
+        async function probeS3Object(url) {
+            try {
+                let response = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+                if (response.ok) {
+                    return { exists: true, size: parseInt(response.headers.get('content-length') || '0', 10) || 0 };
+                }
+                if (response.status === 405 || response.status === 403) {
+                    response = await fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
+                    if (response.ok || response.status === 206) {
+                        const contentRange = response.headers.get('content-range') || '';
+                        const match = contentRange.match(/\/(\d+)$/);
+                        return {
+                            exists: true,
+                            size: match ? parseInt(match[1], 10) : (parseInt(response.headers.get('content-length') || '0', 10) || 0)
+                        };
+                    }
+                }
+            } catch (e) {
+                console.warn('S3 object probe failed:', url, e);
+            }
+            return { exists: false, size: 0 };
+        }
+
+        function addS3ObjectToItemAssets(item, obj, sourceLabel = 'S3') {
+            item.assets = item.assets || {};
+            const existingUrls = new Set(Object.values(item.assets).map(asset => translateS3Url(asset.href, item.sourceUrl)));
+            if (existingUrls.has(obj.url)) return false;
+
+            const pathname = getAssetPathname(obj.url);
+            if (!shouldDisplayS3Object(pathname)) return false;
+
+            const baseKey = makeDiscoveredAssetKey(obj.key || pathname);
+            const temporaryAsset = { href: obj.url, title: getObjectFileName(pathname) };
+            const classification = classifyStacAsset(baseKey, temporaryAsset, item.sourceUrl);
+            const assetKey = makeUniqueAssetKey(item.assets, baseKey);
+            const productLabel = classification.productCode === 'DATA' ? classification.extension.replace(/^\./, '').toUpperCase() : classification.productCode;
+
+            item.assets[assetKey] = {
+                href: obj.url,
+                title: `${productLabel} — ${classification.fileName}`,
+                type: guessMimeTypeFromProduct(classification.productCode, classification.extension),
+                roles: classification.isStreamableCog ? ['data', 'visual', 'cog'] : ['data'],
+                description: `Discovered from ${sourceLabel} for this selected Umbra image${obj.size ? ` (${formatBytes(obj.size)})` : ''}.`,
+                _discoveredFromS3: true,
+                _sizeBytes: obj.size || 0,
+                _s3Prefix: obj.key ? obj.key.split('/').slice(0, -1).join('/') + '/' : ''
+            };
+            return true;
+        }
+
+        async function addObjectsFromS3Prefix(item, entry) {
+            const objects = await listS3PrefixObjects(entry.bucket, entry.region, entry.prefix, { maxPages: 5, maxKeys: 1000 });
+            let added = 0;
+            objects.forEach(obj => {
+                if (addS3ObjectToItemAssets(item, obj, `AWS S3 prefix ${entry.prefix}`)) added++;
+            });
+            return added;
+        }
+
+        async function discoverLikelyUmbraImagePrefixesFromTaskRoots(item) {
+            const roots = getDerivedUmbraTaskRootPrefixesForItem(item);
+            const stamps = getUmbraTimestampVariantsForItem(item);
+            const exactStamps = stamps.filter(v => /^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$/.test(v));
+            const dateStamps = stamps.filter(v => /^\d{4}-\d{2}-\d{2}$/.test(v));
+            const discovered = [];
+
+            for (const root of roots) {
+                try {
+                    const childPrefixes = await listS3CommonPrefixes(root.bucket, root.region, root.prefix);
+                    childPrefixes.forEach(prefix => {
+                        const folderName = prefix.replace(/\/$/, '').split('/').pop() || '';
+                        let score = 0;
+                        if (exactStamps.some(stamp => folderName.includes(stamp))) score += 100;
+                        if (dateStamps.some(stamp => folderName.includes(stamp))) score += 20;
+                        if (/\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}/.test(folderName)) score += 5;
+                        if (score > 0) discovered.push({ ...root, prefix, source: 'discovered-task-child', score });
+                    });
+                } catch (e) {
+                    console.warn('Umbra task-root prefix discovery failed:', root.prefix, e);
+                }
+            }
+
+            const seen = new Set();
+            return discovered
+                .sort((a, b) => b.score - a.score || a.prefix.localeCompare(b.prefix))
+                .filter(entry => {
+                    const id = `${entry.bucket}|${entry.region}|${entry.prefix}`;
+                    if (seen.has(id)) return false;
+                    seen.add(id);
+                    return true;
+                })
+                .slice(0, 8);
+        }
+
+        async function addPredictedUmbraDeliverables(item) {
+            const predicted = getPredictedUmbraDeliverableObjectsForItem(item);
+            let added = 0;
+            predicted.sort((a, b) => {
+                const aGec = /_GEC\.tif$/i.test(a.key) ? 0 : 1;
+                const bGec = /_GEC\.tif$/i.test(b.key) ? 0 : 1;
+                return aGec - bGec || a.key.localeCompare(b.key);
+            });
+
+            for (const obj of predicted) {
+                const probe = await probeS3Object(obj.url);
+                if (!probe.exists) continue;
+                if (addS3ObjectToItemAssets(item, { ...obj, size: probe.size }, 'Umbra naming-convention fallback')) added++;
+            }
+            return added;
+        }
+
         async function reconcileStacAssetsWithS3(item) {
             if (!item || item._s3DeliverablesReconciled) return 0;
             item._s3DeliverablesReconciled = true;
             item.assets = item.assets || {};
-
-            const prefixes = getS3DirectoryPrefixesForItem(item);
-            if (prefixes.length === 0) return 0;
-
-            const existingUrls = new Set(Object.values(item.assets).map(asset => translateS3Url(asset.href, item.sourceUrl)));
             let added = 0;
 
-            for (const entry of prefixes) {
+            const exactPrefixes = getS3DirectoryPrefixesForItem(item);
+            for (const entry of exactPrefixes) {
                 try {
-                    const objects = await listS3PrefixObjects(entry.bucket, entry.region, entry.prefix);
-                    for (const obj of objects) {
-                        const pathname = getAssetPathname(obj.url);
-                        if (!shouldDisplayS3Object(pathname)) continue;
-                        if (existingUrls.has(obj.url)) continue;
-
-                        const temporaryAsset = { href: obj.url, title: getObjectFileName(pathname) };
-                        const classification = classifyStacAsset(makeDiscoveredAssetKey(obj.key), temporaryAsset, item.sourceUrl);
-                        const assetKey = makeUniqueAssetKey(item.assets, makeDiscoveredAssetKey(obj.key));
-                        const productLabel = classification.productCode === 'DATA' ? classification.extension.replace(/^\./, '').toUpperCase() : classification.productCode;
-
-                        item.assets[assetKey] = {
-                            href: obj.url,
-                            title: `${productLabel} — ${classification.fileName}`,
-                            type: guessMimeTypeFromProduct(classification.productCode, classification.extension),
-                            roles: ['data'],
-                            description: `Discovered from AWS S3 sibling objects for this STAC Item (${formatBytes(obj.size)}).`,
-                            _discoveredFromS3: true,
-                            _sizeBytes: obj.size
-                        };
-                        existingUrls.add(obj.url);
-                        added++;
-                    }
+                    added += await addObjectsFromS3Prefix(item, entry);
                 } catch (e) {
                     console.warn('S3 deliverable reconciliation skipped for prefix:', entry.prefix, e);
+                }
+            }
+
+            const hasGec = () => getDeliverableEntries(item).some(entry => entry.classification.productCode === 'GEC' && entry.classification.isStreamableCog);
+            if (!hasGec()) {
+                const likelyPrefixes = await discoverLikelyUmbraImagePrefixesFromTaskRoots(item);
+                for (const entry of likelyPrefixes) {
+                    try {
+                        added += await addObjectsFromS3Prefix(item, entry);
+                        if (hasGec()) break;
+                    } catch (e) {
+                        console.warn('S3 likely-prefix reconciliation skipped for prefix:', entry.prefix, e);
+                    }
+                }
+            }
+
+            if (!hasGec()) {
+                try {
+                    added += await addPredictedUmbraDeliverables(item);
+                } catch (e) {
+                    console.warn('Umbra predicted deliverable fallback failed:', e);
                 }
             }
 
@@ -2268,13 +2570,13 @@
             document.getElementById('det-id').innerText = props["umbra:task_id"] || item.id || "N/A";
 
             // Populate Available SAR Deliverables from the STAC Item, then opportunistically reconcile against sibling objects in the AWS bucket.
-            renderAvailableDeliverables(item, "Reading STAC asset links for this collect...");
+            renderAvailableDeliverables(item, "Reading STAC links and checking the Umbra sar-data/tasks image folder for sibling deliverables...");
             reconcileStacAssetsWithS3(item).then(added => {
                 if (selectedItem && selectedItem.id === item.id) {
                     configurePrimaryStreamButton(item);
                     renderAvailableDeliverables(item, added > 0
-                        ? `Added ${added} sibling AWS object${added === 1 ? '' : 's'} from the collect folder.`
-                        : "STAC assets verified; no additional sibling AWS objects found.");
+                        ? `Added ${added} AWS object${added === 1 ? '' : 's'} from the selected image delivery folder / naming fallback.`
+                        : "Checked the derived image delivery folder. No additional AWS objects were exposed by S3 for this collect.");
                 }
             }).catch(err => {
                 console.warn('S3 reconciliation failed:', err);
