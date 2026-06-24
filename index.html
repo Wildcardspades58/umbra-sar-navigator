@@ -72,7 +72,7 @@
             <div>
                 <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
                     Umbra SAR Navigator 
-                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.11</span>
+                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.12</span>
                     <span class="text-xs bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded font-normal">Analyst Tool</span>
                 </h1>
                 <p class="text-xs text-slate-400">Interactive OpenStreetMap client for Umbra Space SpatioTemporal Asset Catalogs</p>
@@ -622,11 +622,11 @@
                     <div class="border-t border-slate-800 pt-2 space-y-1.5">
                         <label for="raster-bounds-mode-select" class="block text-[10px] uppercase tracking-wider text-slate-500 font-bold">COG Georeference / Scale Mode</label>
                         <select id="raster-bounds-mode-select" class="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1.5 text-[11px] text-slate-300 focus:outline-none focus:border-indigo-500">
-                            <option value="auto" selected>Auto: canvas-fit to STAC footprint if scale looks wrong</option>
+                            <option value="auto" selected>Auto: rotated canvas-fit to STAC footprint if scale looks wrong</option>
                             <option value="native">Native GeoTIFF bounds</option>
-                            <option value="footprint">Force canvas-fit to selected STAC footprint</option>
+                            <option value="footprint">Force rotated canvas-fit to selected STAC footprint</option>
                         </select>
-                        <p id="raster-scale-mode-note" class="text-[9px] leading-relaxed text-slate-500">Auto compares parsed COG bounds with the selected footprint. Severe scale mismatches use a canvas-fit overlay that physically stretches the rendered pixels into the footprint.</p>
+                        <p id="raster-scale-mode-note" class="text-[9px] leading-relaxed text-slate-500">Auto compares parsed COG bounds with the selected footprint. Severe scale mismatches use a rotated canvas-fit overlay that stretches the rendered pixels into the footprint and follows the footprint orientation when polygon corners are available.</p>
                     </div>
 
                     <div class="grid grid-cols-2 gap-2 pt-1">
@@ -1279,6 +1279,205 @@
             }
         }
 
+
+        function getPrimaryGeometryRing(geometry) {
+            if (!geometry || !geometry.coordinates) return null;
+            if (geometry.type === 'Polygon' && Array.isArray(geometry.coordinates[0])) {
+                return geometry.coordinates[0];
+            }
+            if (geometry.type === 'MultiPolygon' && Array.isArray(geometry.coordinates)) {
+                const polygons = geometry.coordinates.filter(poly => Array.isArray(poly) && Array.isArray(poly[0]));
+                if (!polygons.length) return null;
+                let bestRing = polygons[0][0];
+                let bestArea = -Infinity;
+                polygons.forEach(poly => {
+                    const ring = poly[0];
+                    const area = approximateRingArea(ring);
+                    if (area > bestArea) {
+                        bestArea = area;
+                        bestRing = ring;
+                    }
+                });
+                return bestRing;
+            }
+            return null;
+        }
+
+        function approximateRingArea(ring) {
+            if (!Array.isArray(ring) || ring.length < 3) return 0;
+            let area = 0;
+            for (let i = 0; i < ring.length; i++) {
+                const a = ring[i];
+                const b = ring[(i + 1) % ring.length];
+                if (!Array.isArray(a) || !Array.isArray(b)) continue;
+                const ax = Number(a[0]);
+                const ay = Number(a[1]);
+                const bx = Number(b[0]);
+                const by = Number(b[1]);
+                if ([ax, ay, bx, by].every(Number.isFinite)) {
+                    area += (ax * by) - (bx * ay);
+                }
+            }
+            return Math.abs(area / 2);
+        }
+
+        function getSelectedFootprintCornerSet() {
+            if (!selectedItem?.geometry || !window.L) return null;
+            const ring = getPrimaryGeometryRing(selectedItem.geometry);
+            if (!Array.isArray(ring)) return null;
+
+            const points = [];
+            ring.forEach(coord => {
+                if (!Array.isArray(coord) || coord.length < 2) return;
+                const lng = Number(coord[0]);
+                const lat = Number(coord[1]);
+                if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+                const isDup = points.some(p => Math.abs(p.lat - lat) < 1e-12 && Math.abs(p.lng - lng) < 1e-12);
+                if (!isDup) points.push({ lat, lng });
+            });
+            if (points.length < 3) return null;
+
+            const meanLat = points.reduce((sum, p) => sum + p.lat, 0) / points.length;
+            const cosLat = Math.max(Math.cos(meanLat * Math.PI / 180), 0.000001);
+            const enriched = points.map((p, idx) => {
+                const x = p.lng * cosLat;
+                const y = p.lat;
+                return {
+                    idx,
+                    x,
+                    y,
+                    sum: x + y,
+                    diff: x - y,
+                    latlng: L.latLng(p.lat, p.lng)
+                };
+            });
+
+            const used = new Set();
+            function pick(sortedList) {
+                for (const candidate of sortedList) {
+                    if (!used.has(candidate.idx)) {
+                        used.add(candidate.idx);
+                        return candidate;
+                    }
+                }
+                return sortedList[0] || null;
+            }
+
+            const topLeft = pick([...enriched].sort((a, b) => a.diff - b.diff));
+            const topRight = pick([...enriched].sort((a, b) => b.sum - a.sum));
+            const bottomRight = pick([...enriched].sort((a, b) => b.diff - a.diff));
+            const bottomLeft = pick([...enriched].sort((a, b) => a.sum - b.sum));
+
+            if (!topLeft || !topRight || !bottomLeft) return null;
+
+            return {
+                topLeft: topLeft.latlng,
+                topRight: topRight.latlng,
+                bottomRight: bottomRight?.latlng || null,
+                bottomLeft: bottomLeft.latlng,
+                pointCount: points.length
+            };
+        }
+
+        function ensureParallelogramImageOverlayClass() {
+            if (!window.L || L.ParallelogramImageOverlay) return;
+
+            L.ParallelogramImageOverlay = L.Layer.extend({
+                options: {
+                    opacity: 1,
+                    pane: 'overlayPane',
+                    interactive: false,
+                    zIndex: 1,
+                    className: ''
+                },
+
+                initialize: function(url, topLeft, topRight, bottomLeft, options) {
+                    L.setOptions(this, options);
+                    this._url = url;
+                    this._topLeft = L.latLng(topLeft);
+                    this._topRight = L.latLng(topRight);
+                    this._bottomLeft = L.latLng(bottomLeft);
+                    this._bottomRight = this.options.bottomRight ? L.latLng(this.options.bottomRight) : L.latLng(
+                        this._bottomLeft.lat + (this._topRight.lat - this._topLeft.lat),
+                        this._bottomLeft.lng + (this._topRight.lng - this._topLeft.lng)
+                    );
+                },
+
+                onAdd: function(map) {
+                    this._map = map;
+                    if (!this._image) this._initImage();
+                    const pane = map.getPane(this.options.pane) || map.getPanes().overlayPane;
+                    pane.appendChild(this._image);
+                    map.on('zoom viewreset move resize', this._reset, this);
+                    this._reset();
+                },
+
+                onRemove: function(map) {
+                    map.off('zoom viewreset move resize', this._reset, this);
+                    if (this._image && this._image.parentNode) this._image.parentNode.removeChild(this._image);
+                    this._map = null;
+                },
+
+                _initImage: function() {
+                    const img = this._image = L.DomUtil.create('img', `leaflet-image-layer ${this.options.className || ''}`.trim());
+                    img.src = this._url;
+                    img.alt = '';
+                    img.style.position = 'absolute';
+                    img.style.left = '0px';
+                    img.style.top = '0px';
+                    img.style.transformOrigin = '0 0';
+                    img.style.pointerEvents = this.options.interactive ? 'auto' : 'none';
+                    img.style.userSelect = 'none';
+                    img.style.webkitUserDrag = 'none';
+                    img.style.opacity = this.options.opacity;
+                    if (this.options.crossOrigin) img.crossOrigin = this.options.crossOrigin === true ? '' : this.options.crossOrigin;
+                    if (this.options.zIndex != null) img.style.zIndex = String(this.options.zIndex);
+                    L.DomEvent.on(img, 'load', this._reset, this);
+                },
+
+                _reset: function() {
+                    if (!this._map || !this._image) return;
+                    const width = this._image.naturalWidth || this.options.imageWidth || 0;
+                    const height = this._image.naturalHeight || this.options.imageHeight || 0;
+                    if (!width || !height) return;
+
+                    const p0 = this._map.latLngToLayerPoint(this._topLeft);
+                    const p1 = this._map.latLngToLayerPoint(this._topRight);
+                    const p2 = this._map.latLngToLayerPoint(this._bottomLeft);
+
+                    this._image.style.width = `${width}px`;
+                    this._image.style.height = `${height}px`;
+
+                    const a = (p1.x - p0.x) / width;
+                    const b = (p1.y - p0.y) / width;
+                    const c = (p2.x - p0.x) / height;
+                    const d = (p2.y - p0.y) / height;
+                    const e = p0.x;
+                    const f = p0.y;
+                    this._image.style.transform = `matrix(${a}, ${b}, ${c}, ${d}, ${e}, ${f})`;
+                },
+
+                setOpacity: function(opacity) {
+                    this.options.opacity = opacity;
+                    if (this._image) this._image.style.opacity = opacity;
+                    return this;
+                },
+
+                bringToFront: function() {
+                    if (this._image) this._image.style.zIndex = String((Number(this.options.zIndex) || 1) + 1);
+                    return this;
+                },
+
+                getBounds: function() {
+                    return L.latLngBounds([this._topLeft, this._topRight, this._bottomLeft, this._bottomRight]);
+                }
+            });
+
+            L.parallelogramImageOverlay = function(url, topLeft, topRight, bottomLeft, options) {
+                return new L.ParallelogramImageOverlay(url, topLeft, topRight, bottomLeft, options);
+            };
+        }
+
         function latLngBoundsArea(bounds) {
             if (!bounds || !bounds.isValid || !bounds.isValid()) return null;
             const sw = bounds.getSouthWest();
@@ -1442,23 +1641,43 @@
                 throw new Error('Footprint-fit render mode requires a selected STAC footprint, but no valid footprint bounds are available.');
             }
             const rendered = buildSarCanvasDataUrl(georaster, stretch);
-            const overlay = L.imageOverlay(rendered.url, targetBounds, {
-                pane: 'sarRasterPane',
-                opacity: document.getElementById('overlay-opacity')?.value / 100 || 0.7,
-                interactive: false,
-                zIndex: 460
-            });
+            const opacity = document.getElementById('overlay-opacity')?.value / 100 || 0.7;
+            const cornerSet = getSelectedFootprintCornerSet();
+            let overlay;
+
+            if (cornerSet?.topLeft && cornerSet?.topRight && cornerSet?.bottomLeft) {
+                ensureParallelogramImageOverlayClass();
+                overlay = L.parallelogramImageOverlay(rendered.url, cornerSet.topLeft, cornerSet.topRight, cornerSet.bottomLeft, {
+                    bottomRight: cornerSet.bottomRight,
+                    pane: 'sarRasterPane',
+                    opacity,
+                    interactive: false,
+                    zIndex: 460,
+                    className: 'leaflet-zoom-animated'
+                });
+                overlay._umbraRotatedOverlay = true;
+                overlay._umbraFootprintCorners = cornerSet;
+                overlay._umbraRenderMode = 'footprint-rotated-canvas-overlay';
+            } else {
+                overlay = L.imageOverlay(rendered.url, targetBounds, {
+                    pane: 'sarRasterPane',
+                    opacity,
+                    interactive: false,
+                    zIndex: 460
+                });
+                overlay._umbraRenderMode = 'footprint-canvas-overlay';
+            }
+
             overlay._umbraCanvasOverlay = true;
             overlay._umbraCanvasInfo = rendered;
             overlay._umbraBoundsAssessment = boundsAssessment;
-            overlay._umbraRenderMode = 'footprint-canvas-overlay';
             return overlay;
         }
 
         function createGeoRasterLeafletLayer(georaster, stretch, boundsAssessment = null) {
             const assessment = boundsAssessment || getRasterBoundsAssessment(georaster);
 
-            // Important v1.3.11 change:
+            // Important v1.3.12 change:
             // GeoRasterLayer can still use the parsed native coordinate grid internally even when a
             // `bounds` option is supplied. When the native area is wildly smaller/larger than the
             // selected STAC footprint, use a generated PNG ImageOverlay instead. That physically
@@ -1574,7 +1793,7 @@
             if (rasterLabel) rasterLabel.innerText = rasterLoaded ? activeGeoRasterContext.title : 'No GeoTIFF loaded';
             if (scaleNote) scaleNote.innerText = rasterLoaded && activeGeoRasterContext.boundsAssessment
                 ? activeGeoRasterContext.boundsAssessment.note
-                : 'Auto compares parsed COG bounds with the selected footprint and corrects severe scale mismatches.';
+                : 'Auto compares parsed COG bounds with the selected footprint and corrects severe scale mismatches with a rotated footprint-fit canvas overlay when possible.';
             if (status) {
                 const fpCount = footprintGroup ? footprintGroup.getLayers().length : 0;
                 const mode = activeGeoRasterContext?.boundsAssessment?.modeUsed || getRasterBoundsMode();
@@ -3379,7 +3598,7 @@
             safeSetText('diag-raster-bounds', boundsText);
 
             const transform = georaster?.geoTransform || georaster?.metadata?.geoTransform || georaster?.metadata?.ModelTransformationTag || georaster?.ModelTransformationTag;
-            let rotationWarning = 'No rotation/skew transform was exposed to the browser parser; Leaflet will render this as a sampled north-up raster grid.';
+            let rotationWarning = 'No rotation/skew transform was exposed to the browser parser; Leaflet will render this as a sampled north-up raster grid unless the rotated footprint-fit overlay mode is used.';
             if (Array.isArray(transform) && transform.length >= 6) {
                 const skewX = Math.abs(Number(transform[2]) || 0);
                 const skewY = Math.abs(Number(transform[4]) || 0);
@@ -3392,7 +3611,9 @@
                 : '';
             const assessment = boundsAssessment || getRasterBoundsAssessment(georaster);
             const canvasInfo = activeGeoRasterLayer?._umbraCanvasOverlay && activeGeoRasterLayer?._umbraCanvasInfo
-                ? ` Render path: footprint-fit canvas overlay (${activeGeoRasterLayer._umbraCanvasInfo.width}×${activeGeoRasterLayer._umbraCanvasInfo.height} display canvas from ${activeGeoRasterLayer._umbraCanvasInfo.sourceWidth}×${activeGeoRasterLayer._umbraCanvasInfo.sourceHeight} source pixels).`
+                ? activeGeoRasterLayer?._umbraRotatedOverlay
+                    ? ` Render path: rotated footprint-fit canvas overlay (${activeGeoRasterLayer._umbraCanvasInfo.width}×${activeGeoRasterLayer._umbraCanvasInfo.height} display canvas from ${activeGeoRasterLayer._umbraCanvasInfo.sourceWidth}×${activeGeoRasterLayer._umbraCanvasInfo.sourceHeight} source pixels).`
+                    : ` Render path: footprint-fit canvas overlay (${activeGeoRasterLayer._umbraCanvasInfo.width}×${activeGeoRasterLayer._umbraCanvasInfo.height} display canvas from ${activeGeoRasterLayer._umbraCanvasInfo.sourceWidth}×${activeGeoRasterLayer._umbraCanvasInfo.sourceHeight} source pixels).`
                 : ` Render path: GeoRasterLayer native tile grid.`;
             const scaleNote = assessment?.ratio
                 ? ` Scale mode: ${assessment.modeUsed}. Native/footprint area ratio ≈ ${assessment.ratio.toPrecision(5)}. ${assessment.note}${canvasInfo}`
