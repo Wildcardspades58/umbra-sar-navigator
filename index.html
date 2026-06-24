@@ -72,7 +72,7 @@
             <div>
                 <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
                     Umbra SAR Navigator 
-                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.5</span>
+                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.6</span>
                     <span class="text-xs bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded font-normal">Analyst Tool</span>
                 </h1>
                 <p class="text-xs text-slate-400">Interactive OpenStreetMap client for Umbra Space SpatioTemporal Asset Catalogs</p>
@@ -539,6 +539,12 @@
                 label: "S3 REST Bucket Endpoint",
                 role: "Direct AWS object/API endpoint used by the app",
                 url: "https://umbra-open-data-catalog.s3.us-west-2.amazonaws.com/"
+            },
+            {
+                label: "Known Working Las Vegas GEC COG",
+                role: "Diagnostic sample: exact GEC GeoTIFF object URL for streaming tests",
+                url: "https://umbra-open-data-catalog.s3.amazonaws.com/sar-data/tasks/New%20Las%20Vegas%20Stadium%2C%20Nevada%2C%20United%20States/b9f9bae1-ed74-4851-90d1-76a292dec9de/2025-06-06-04-51-17_UMBRA-05/2025-06-06-04-51-17_UMBRA-05_GEC.tif",
+                streamTest: true
             }
         ];
 
@@ -867,7 +873,7 @@
             const response = await fetch(url, { cache: 'no-store' });
 
             if (!response.ok) {
-                if (response.status === 404) throw new Error(`404 Not Found: The STAC catalog references this asset, but the physical file does not exist on S3.\n\nTarget: ${url}`);
+                if (response.status === 404) throw new Error(`404 Not Found: S3 did not find this exact GeoTIFF object.\n\nTarget: ${url}\n\nThis usually means the app derived the wrong target / collection-id / collect-folder path. Compare the URL against the expected Umbra pattern:\nsar-data/tasks/<target>/<collection-id>/<YYYY-MM-DD-HH-MM-SS_UMBRA-##>/<YYYY-MM-DD-HH-MM-SS_UMBRA-##_GEC.tif`);
                 if (response.status === 403) throw new Error(`403 Forbidden: AWS blocked access to this file.\n\nTarget: ${url}`);
                 throw new Error(`HTTP ${response.status}: Failed to download raster.\n\nTarget: ${url}`);
             }
@@ -974,8 +980,15 @@
                     </div>
                     <div class="text-slate-500 font-sans">${escapeHtml(ref.role)}</div>
                     <a href="${escapeHtml(ref.url)}" target="_blank" rel="noopener noreferrer" class="block text-indigo-300 hover:text-indigo-200 truncate underline decoration-indigo-500/30" title="${escapeHtml(ref.url)}">${escapeHtml(ref.url)}</a>
+                    ${ref.streamTest ? `<button class="stream-reference-cog-btn mt-1 inline-flex items-center gap-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded px-2 py-1 font-sans font-semibold" data-url="${escapeHtml(ref.url)}"><i data-lucide="monitor-play" class="w-3 h-3"></i> Stream Test COG</button>` : ''}
                 </div>
             `).join('');
+
+            container.querySelectorAll('.stream-reference-cog-btn').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    await streamGeoTiffToMap(btn.getAttribute('data-url') || '', btn);
+                });
+            });
 
             container.querySelectorAll('.copy-single-reference-url').forEach(btn => {
                 btn.addEventListener('click', async () => {
@@ -1669,14 +1682,22 @@
             const u = safeUrlObject(url);
             if (!u) return null;
 
-            const virtualHosted = u.hostname.match(/^(.+?)\.s3[.-]([a-z0-9-]+)\.amazonaws\.com$/i);
+            // Virtual-hosted S3 URLs. Supports both regional
+            //   bucket.s3.us-west-2.amazonaws.com/key
+            // and legacy global
+            //   bucket.s3.amazonaws.com/key
+            const virtualHosted = u.hostname.match(/^(.+?)\.s3(?:[.-]([a-z0-9-]+))?\.amazonaws\.com$/i);
             if (virtualHosted) {
                 const key = decodeURIComponent(u.pathname.replace(/^\/+/, ''));
                 if (!key) return null;
                 return { bucket: virtualHosted[1], region: virtualHosted[2] || 'us-west-2', key };
             }
 
-            const pathStyle = u.hostname.match(/^s3[.-]([a-z0-9-]+)\.amazonaws\.com$/i);
+            // Path-style S3 URLs. Supports both regional
+            //   s3.us-west-2.amazonaws.com/bucket/key
+            // and legacy global
+            //   s3.amazonaws.com/bucket/key
+            const pathStyle = u.hostname.match(/^s3(?:[.-]([a-z0-9-]+))?\.amazonaws\.com$/i);
             if (pathStyle) {
                 const parts = decodeURIComponent(u.pathname.replace(/^\/+/, '')).split('/');
                 const bucket = parts.shift();
@@ -1689,7 +1710,14 @@
         }
 
         function getS3ObjectUrl(bucket, region, key) {
-            return `https://${bucket}.s3.${region || 'us-west-2'}.amazonaws.com/${String(key || '').split('/').map(encodeURIComponent).join('/')}`;
+            const encodedKey = String(key || '').split('/').map(encodeURIComponent).join('/');
+            // For Umbra object fetches, match the public bucket URL pattern used by the
+            // Open Data browser and user-validated examples. The regional endpoint is
+            // still used for ListObjectsV2 calls elsewhere.
+            if (String(bucket || '').toLowerCase() === 'umbra-open-data-catalog') {
+                return `https://${bucket}.s3.amazonaws.com/${encodedKey}`;
+            }
+            return `https://${bucket}.s3.${region || 'us-west-2'}.amazonaws.com/${encodedKey}`;
         }
 
         function getUmbraOpenDataBucketInfo() {
@@ -2290,6 +2318,7 @@
                 description: `${obj.unverified ? 'Predicted from Umbra delivery naming convention' : `Discovered from ${sourceLabel}`} for this selected Umbra image${obj.size ? ` (${formatBytes(obj.size)})` : ''}.`,
                 _discoveredFromS3: true,
                 _unverifiedPredicted: !!obj.unverified,
+                _knownDiagnosticSample: !!obj.diagnosticSample,
                 _sizeBytes: obj.size || 0,
                 _s3Prefix: obj.key ? obj.key.split('/').slice(0, -1).join('/') + '/' : ''
             };
@@ -2363,11 +2392,65 @@
                 .slice(0, 16);
         }
 
+        function addImmediateUmbraPredictedGecRows(item, options = {}) {
+            // Fast path for the UX: a streamable GEC button should appear immediately
+            // when a STAC item is selected. Do not wait on S3 ListObjects/HEAD checks.
+            if (!item) return 0;
+            item.assets = item.assets || {};
+            let added = 0;
+            const maxRows = options.maxRows || 10;
+
+            const knownSamples = getKnownUmbraDiagnosticGecObjectsForItem(item);
+            knownSamples.forEach(obj => {
+                if (addS3ObjectToItemAssets(item, { ...obj, unverified: false, size: 0, diagnosticSample: true }, 'known Umbra diagnostic sample')) {
+                    added++;
+                }
+            });
+
+            const predictedGecs = getPredictedUmbraDeliverableObjectsForItem(item)
+                .filter(obj => /_GEC\.tif$/i.test(obj.key))
+                .slice(0, maxRows);
+
+            predictedGecs.forEach((obj, idx) => {
+                if (addS3ObjectToItemAssets(item, { ...obj, size: 0, unverified: true, predictedRank: idx + 1 }, 'immediate Umbra GEC naming prediction')) {
+                    added++;
+                }
+            });
+            return added;
+        }
+
+        function getKnownUmbraDiagnosticGecObjectsForItem(item) {
+            const haystack = [
+                item?.id,
+                item?.collection,
+                item?.sourceUrl,
+                item?.properties?.['umbra:target_name'],
+                item?.properties?.['umbra:open_data_location'],
+                ...(getCandidateUrlsForItem(item) || [])
+            ].join(' ').toLowerCase();
+
+            const isLasVegasSample = haystack.includes('new las vegas stadium') ||
+                haystack.includes('b9f9bae1-ed74-4851-90d1-76a292dec9de') ||
+                haystack.includes('2025-06-06-04-51-17_umbra-05');
+            if (!isLasVegasSample) return [];
+
+            const key = 'sar-data/tasks/New Las Vegas Stadium, Nevada, United States/b9f9bae1-ed74-4851-90d1-76a292dec9de/2025-06-06-04-51-17_UMBRA-05/2025-06-06-04-51-17_UMBRA-05_GEC.tif';
+            const { bucket, region } = getUmbraOpenDataBucketInfo();
+            return [{
+                key,
+                url: getS3ObjectUrl(bucket, region, key),
+                bucket,
+                region,
+                product: { code: 'GEC', ext: 'tif' }
+            }];
+        }
+
         async function addPredictedUmbraDeliverables(item, options = {}) {
             const predicted = getPredictedUmbraDeliverableObjectsForItem(item);
             let added = 0;
             const allowUnverified = !!options.allowUnverified;
             const onlyGecIfUnverified = !!options.onlyGecIfUnverified;
+            const skipProbe = !!options.skipProbe;
             predicted.sort((a, b) => {
                 const aGec = /_GEC\.tif$/i.test(a.key) ? 0 : 1;
                 const bGec = /_GEC\.tif$/i.test(b.key) ? 0 : 1;
@@ -2375,6 +2458,15 @@
             });
 
             for (const obj of predicted) {
+                if (skipProbe) {
+                    if (allowUnverified) {
+                        if (onlyGecIfUnverified && !/_GEC\.tif$/i.test(obj.key)) continue;
+                        if (!/_GEC\.tif$|_CSI\.tif$|_SIDD\.nitf$|_SICD\.nitf$|_CPHD\.cphd$|_METADATA\.json$/i.test(obj.key)) continue;
+                        if (addS3ObjectToItemAssets(item, { ...obj, size: 0, unverified: true }, 'Umbra naming-convention fallback')) added++;
+                    }
+                    continue;
+                }
+
                 const probe = await probeS3Object(obj.url);
                 if (probe.exists) {
                     if (addS3ObjectToItemAssets(item, { ...obj, size: probe.size }, 'Umbra naming-convention fallback')) added++;
@@ -2422,7 +2514,7 @@
 
             if (!hasGec()) {
                 try {
-                    added += await addPredictedUmbraDeliverables(item, { allowUnverified: true, onlyGecIfUnverified: false });
+                    added += await addPredictedUmbraDeliverables(item, { allowUnverified: true, onlyGecIfUnverified: false, skipProbe: true });
                 } catch (e) {
                     console.warn('Umbra predicted deliverable fallback failed:', e);
                 }
@@ -2573,7 +2665,7 @@
                 const safeKey = escapeHtml(key);
                 const safeExt = escapeHtml(classification.extension);
                 const safeFilename = escapeHtml(`${item.id || 'collect'}_${key}`);
-                const sourceBadge = asset._unverifiedPredicted ? 'PREDICTED' : (asset._discoveredFromS3 ? 'S3' : 'STAC');
+                const sourceBadge = asset._knownDiagnosticSample ? 'EXAMPLE' : (asset._unverifiedPredicted ? 'PREDICTED' : (asset._discoveredFromS3 ? 'S3' : 'STAC'));
                 const sizeBadge = asset._sizeBytes ? `<span class="text-[9px] bg-slate-900 text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded uppercase font-mono">${escapeHtml(formatBytes(asset._sizeBytes))}</span>` : '';
                 const streamButton = classification.isStreamableCog ? `
                     <button class="stream-raster-btn px-2 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded border border-indigo-400 text-white transition-all shadow-sm flex items-center gap-1"
@@ -2877,6 +2969,9 @@
                 thumbnailEl.classList.add('hidden');
             }
 
+            // Add immediate predicted GEC rows before async S3 discovery so the Stream button appears right away.
+            const immediateGecRowsAdded = addImmediateUmbraPredictedGecRows(item, { maxRows: 8 });
+
             // Set up Primary Prominent Stream Button. This prefers the GEC .tif deliverable when present.
             configurePrimaryStreamButton(item);
 
@@ -2903,8 +2998,10 @@
             document.getElementById('det-azimuth').innerText = props["umbra:target_azimuth_angle_degrees"] ? `${parseFloat(props["umbra:target_azimuth_angle_degrees"]).toFixed(1)}°` : "N/A";
             document.getElementById('det-id').innerText = props["umbra:task_id"] || item.id || "N/A";
 
-            // Populate Available SAR Deliverables from the STAC Item, then opportunistically reconcile against sibling objects in the AWS bucket.
-            renderAvailableDeliverables(item, "Reading STAC links and checking the Umbra sar-data/tasks image folder for sibling deliverables...");
+            // Populate Available SAR Deliverables immediately, then opportunistically reconcile against sibling objects in the AWS bucket.
+            renderAvailableDeliverables(item, immediateGecRowsAdded > 0
+                ? `Showing ${immediateGecRowsAdded} immediate predicted GEC GeoTIFF stream candidate${immediateGecRowsAdded === 1 ? '' : 's'}. Checking AWS for additional sibling deliverables in the background...`
+                : "Reading STAC links and checking the Umbra sar-data/tasks image folder for sibling deliverables...");
             reconcileStacAssetsWithS3(item).then(added => {
                 if (selectedItem && selectedItem.id === item.id) {
                     configurePrimaryStreamButton(item);
