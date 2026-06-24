@@ -72,7 +72,7 @@
             <div>
                 <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
                     Umbra SAR Navigator 
-                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.10</span>
+                    <span class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded font-mono">v1.3.11</span>
                     <span class="text-xs bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded font-normal">Analyst Tool</span>
                 </h1>
                 <p class="text-xs text-slate-400">Interactive OpenStreetMap client for Umbra Space SpatioTemporal Asset Catalogs</p>
@@ -622,11 +622,11 @@
                     <div class="border-t border-slate-800 pt-2 space-y-1.5">
                         <label for="raster-bounds-mode-select" class="block text-[10px] uppercase tracking-wider text-slate-500 font-bold">COG Georeference / Scale Mode</label>
                         <select id="raster-bounds-mode-select" class="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1.5 text-[11px] text-slate-300 focus:outline-none focus:border-indigo-500">
-                            <option value="auto" selected>Auto: use STAC footprint if scale looks wrong</option>
+                            <option value="auto" selected>Auto: canvas-fit to STAC footprint if scale looks wrong</option>
                             <option value="native">Native GeoTIFF bounds</option>
-                            <option value="footprint">Force selected STAC footprint bounds</option>
+                            <option value="footprint">Force canvas-fit to selected STAC footprint</option>
                         </select>
-                        <p id="raster-scale-mode-note" class="text-[9px] leading-relaxed text-slate-500">Auto compares parsed COG bounds with the selected footprint and corrects severe scale mismatches.</p>
+                        <p id="raster-scale-mode-note" class="text-[9px] leading-relaxed text-slate-500">Auto compares parsed COG bounds with the selected footprint. Severe scale mismatches use a canvas-fit overlay that physically stretches the rendered pixels into the footprint.</p>
                     </div>
 
                     <div class="grid grid-cols-2 gap-2 pt-1">
@@ -1248,17 +1248,22 @@
             }
         }
 
+        function sarValueToByte(georaster, stretch, rawValue) {
+            const val = Number(rawValue);
+            if (!Number.isFinite(val) || val === georaster.noDataValue) return null;
+
+            const displayValue = stretch.logScale ? Math.log10(Math.max(val, 1e-9)) : val;
+            let normalized = (displayValue - stretch.low) / (stretch.high - stretch.low);
+            normalized = Math.min(Math.max(normalized, 0), 1);
+            // Gentle gamma curve to brighten SAR amplitude texture without crushing highlights.
+            normalized = Math.pow(normalized, 0.72);
+            return Math.min(Math.max(Math.round(normalized * 255), 0), 255);
+        }
+
         function makeSarPixelColorFunction(georaster, stretch) {
             return values => {
-                const val = Number(values[0]);
-                if (!Number.isFinite(val) || val === georaster.noDataValue) return null;
-
-                const displayValue = stretch.logScale ? Math.log10(Math.max(val, 1e-9)) : val;
-                let normalized = (displayValue - stretch.low) / (stretch.high - stretch.low);
-                normalized = Math.min(Math.max(normalized, 0), 1);
-                normalized = Math.pow(normalized, 0.72);
-                const byteVal = Math.min(Math.max(Math.round(normalized * 255), 0), 255);
-
+                const byteVal = sarValueToByte(georaster, stretch, values[0]);
+                if (byteVal === null) return null;
                 return `rgba(${byteVal}, ${byteVal}, ${byteVal}, 1)`;
             };
         }
@@ -1353,11 +1358,124 @@
             return { footprintBounds, nativeBounds, footprintArea, nativeArea, ratio, severeMismatch, recommendedBounds, modeUsed, note };
         }
 
+        function getRasterCanvasMaxDimension() {
+            // Canvas overlay mode is used only when GeoRasterLayer cannot scale the COG correctly.
+            // It intentionally down-samples the full raster into a single image overlay so Leaflet
+            // can place it exactly inside the selected STAC footprint bounds.
+            const resolution = getRasterRenderResolution();
+            if (resolution >= 512) return 4096;
+            if (resolution >= 384) return 3072;
+            if (resolution >= 256) return 2048;
+            return 1024;
+        }
+
+        function sampleGeoRasterBandValue(georaster, x, y, bandIndex = 0) {
+            const band = georaster?.values?.[bandIndex];
+            if (!band) return null;
+            const width = Number(georaster.width || georaster.rasterWidth || 0);
+            if (!width) return null;
+
+            // Most georaster builds expose band values as [row][column]. Some typed-array paths
+            // expose a flat band array. Support both so this fallback is robust across CDN versions.
+            const row = band[y];
+            if (row && typeof row !== 'number' && typeof row.length === 'number') {
+                return row[x];
+            }
+            if (typeof band.length === 'number') {
+                return band[(y * width) + x];
+            }
+            return null;
+        }
+
+        function buildSarCanvasDataUrl(georaster, stretch) {
+            const sourceWidth = Number(georaster.width || georaster.rasterWidth || 0);
+            const sourceHeight = Number(georaster.height || georaster.rasterHeight || 0);
+            if (!sourceWidth || !sourceHeight || !georaster?.values?.length) {
+                throw new Error('GeoRaster pixel values were not exposed by the parser, so the footprint-fit canvas fallback cannot render this COG. Try Native GeoTIFF bounds mode.');
+            }
+
+            const maxDim = getRasterCanvasMaxDimension();
+            const scale = Math.min(1, maxDim / Math.max(sourceWidth, sourceHeight));
+            const canvasWidth = Math.max(1, Math.round(sourceWidth * scale));
+            const canvasHeight = Math.max(1, Math.round(sourceHeight * scale));
+
+            const canvas = document.createElement('canvas');
+            canvas.width = canvasWidth;
+            canvas.height = canvasHeight;
+            const ctx = canvas.getContext('2d', { willReadFrequently: false });
+            const img = ctx.createImageData(canvasWidth, canvasHeight);
+            const data = img.data;
+
+            for (let y = 0; y < canvasHeight; y++) {
+                const srcY = Math.min(sourceHeight - 1, Math.floor((y / canvasHeight) * sourceHeight));
+                for (let x = 0; x < canvasWidth; x++) {
+                    const srcX = Math.min(sourceWidth - 1, Math.floor((x / canvasWidth) * sourceWidth));
+                    const raw = sampleGeoRasterBandValue(georaster, srcX, srcY, 0);
+                    const byteVal = sarValueToByte(georaster, stretch, raw);
+                    const i = ((y * canvasWidth) + x) * 4;
+                    if (byteVal === null) {
+                        data[i] = 0;
+                        data[i + 1] = 0;
+                        data[i + 2] = 0;
+                        data[i + 3] = 0;
+                    } else {
+                        data[i] = byteVal;
+                        data[i + 1] = byteVal;
+                        data[i + 2] = byteVal;
+                        data[i + 3] = 255;
+                    }
+                }
+            }
+            ctx.putImageData(img, 0, 0);
+            return {
+                url: canvas.toDataURL('image/png'),
+                width: canvasWidth,
+                height: canvasHeight,
+                sourceWidth,
+                sourceHeight
+            };
+        }
+
+        function createFootprintFitImageOverlay(georaster, stretch, boundsAssessment) {
+            const targetBounds = boundsAssessment?.recommendedBounds || getSelectedFootprintBounds();
+            if (!targetBounds) {
+                throw new Error('Footprint-fit render mode requires a selected STAC footprint, but no valid footprint bounds are available.');
+            }
+            const rendered = buildSarCanvasDataUrl(georaster, stretch);
+            const overlay = L.imageOverlay(rendered.url, targetBounds, {
+                pane: 'sarRasterPane',
+                opacity: document.getElementById('overlay-opacity')?.value / 100 || 0.7,
+                interactive: false,
+                zIndex: 460
+            });
+            overlay._umbraCanvasOverlay = true;
+            overlay._umbraCanvasInfo = rendered;
+            overlay._umbraBoundsAssessment = boundsAssessment;
+            overlay._umbraRenderMode = 'footprint-canvas-overlay';
+            return overlay;
+        }
+
         function createGeoRasterLeafletLayer(georaster, stretch, boundsAssessment = null) {
+            const assessment = boundsAssessment || getRasterBoundsAssessment(georaster);
+
+            // Important v1.3.11 change:
+            // GeoRasterLayer can still use the parsed native coordinate grid internally even when a
+            // `bounds` option is supplied. When the native area is wildly smaller/larger than the
+            // selected STAC footprint, use a generated PNG ImageOverlay instead. That physically
+            // stretches the rendered SAR pixels into the selected footprint bounds and fixes the
+            // severe 1/1000-scale visual failure mode.
+            const shouldUseFootprintCanvas = Boolean(assessment?.recommendedBounds) && (
+                assessment.modeUsed === 'footprint' ||
+                assessment.modeUsed === 'auto-footprint' ||
+                getRasterBoundsMode() === 'footprint'
+            );
+            if (shouldUseFootprintCanvas) {
+                return createFootprintFitImageOverlay(georaster, stretch, assessment);
+            }
+
             if (!window.GeoRasterLayer) {
                 throw new Error('GeoRasterLayer library failed to load. Check CDN/network access.');
             }
-            const assessment = boundsAssessment || getRasterBoundsAssessment(georaster);
             const layerOptions = {
                 georaster,
                 pane: 'sarRasterPane',
@@ -1368,11 +1486,9 @@
                 keepBuffer: 2,
                 pixelValuesToColorFn: makeSarPixelColorFunction(georaster, stretch)
             };
-            if (assessment?.recommendedBounds) {
-                layerOptions.bounds = assessment.recommendedBounds;
-            }
             const layer = new GeoRasterLayer(layerOptions);
             layer._umbraBoundsAssessment = assessment;
+            layer._umbraRenderMode = 'georaster-layer';
             return layer;
         }
 
@@ -1462,7 +1578,7 @@
             if (status) {
                 const fpCount = footprintGroup ? footprintGroup.getLayers().length : 0;
                 const mode = activeGeoRasterContext?.boundsAssessment?.modeUsed || getRasterBoundsMode();
-                status.innerText = rasterLoaded ? `Raster ${getRasterRenderResolution()} · ${mode}` : `${fpCount} FP`;
+                status.innerText = rasterLoaded ? `Raster ${getRasterRenderResolution()} · ${mode}${activeGeoRasterLayer?._umbraCanvasOverlay ? ' · canvas-fit' : ''}` : `${fpCount} FP`;
             }
         }
 
@@ -3275,9 +3391,12 @@
                 ? ` CRS EPSG:${georaster.projection} requires browser reprojection through proj4/georaster-layer-for-leaflet.`
                 : '';
             const assessment = boundsAssessment || getRasterBoundsAssessment(georaster);
+            const canvasInfo = activeGeoRasterLayer?._umbraCanvasOverlay && activeGeoRasterLayer?._umbraCanvasInfo
+                ? ` Render path: footprint-fit canvas overlay (${activeGeoRasterLayer._umbraCanvasInfo.width}×${activeGeoRasterLayer._umbraCanvasInfo.height} display canvas from ${activeGeoRasterLayer._umbraCanvasInfo.sourceWidth}×${activeGeoRasterLayer._umbraCanvasInfo.sourceHeight} source pixels).`
+                : ` Render path: GeoRasterLayer native tile grid.`;
             const scaleNote = assessment?.ratio
-                ? ` Scale mode: ${assessment.modeUsed}. Native/footprint area ratio ≈ ${assessment.ratio.toPrecision(5)}. ${assessment.note}`
-                : ` Scale mode: ${assessment?.modeUsed || getRasterBoundsMode()}. ${assessment?.note || ''}`;
+                ? ` Scale mode: ${assessment.modeUsed}. Native/footprint area ratio ≈ ${assessment.ratio.toPrecision(5)}. ${assessment.note}${canvasInfo}`
+                : ` Scale mode: ${assessment?.modeUsed || getRasterBoundsMode()}. ${assessment?.note || ''}${canvasInfo}`;
             safeSetText('diag-raster-georef', `${rotationWarning}${crsNote} ${scaleNote} Source: ${getRasterDisplayName(url)}`);
         }
 
@@ -3387,7 +3506,7 @@
                 geoTiffLayerVisible = true;
                 document.getElementById('toggle-geotiff-layer') && (document.getElementById('toggle-geotiff-layer').checked = true);
                 document.getElementById('raster-layer-status').classList.remove('hidden');
-                document.getElementById('status-text').innerText = `${tiffInfo.tiffType} stream active at ${getRasterRenderResolution()} samples · ${boundsAssessment.modeUsed} bounds`;
+                document.getElementById('status-text').innerText = `${tiffInfo.tiffType} stream active at ${getRasterRenderResolution()} samples · ${boundsAssessment.modeUsed} bounds${activeGeoRasterLayer?._umbraCanvasOverlay ? ' · canvas-fit scale correction' : ''}`;
                 updateLayerControlPanel();
 
                 btnElement.innerHTML = `<i data-lucide="check-circle" class="w-4 h-4 text-emerald-300"></i> Stream Live`;
